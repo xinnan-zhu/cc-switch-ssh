@@ -2049,7 +2049,7 @@
     "applied": "已应用",
     "apply": "切换",
     "confirmOverwriteTitle": "确认覆盖远端配置？",
-    "confirmOverwriteMessage": "继续后会把选中的本地供应商写入远端。当前远端文件会先自动备份；供应商相关配置会被替换，MCP、项目信任等远端设置会保留。",
+    "confirmOverwriteMessage": "继续后会把选中的本地供应商写入远端。供应商相关配置会被替换，MCP、项目信任等远端设置会保留。",
     "confirmOverwrite": "确认切换",
     "restartProcesses": "重启进程",
     "restartProcessesHint": "结束远端相关进程，让新配置立即生效",

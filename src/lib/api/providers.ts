@@ -52,6 +52,7 @@ export interface RemoteApplyResult {
   providerId: string;
   writtenFiles: string[];
   removedFiles: string[];
+  remoteState: RemoteProviderState;
   overwroteExistingConfig: boolean;
   warnings: string[];
 }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
@@ -276,9 +276,20 @@ export function RemoteProviderPage({
         "远端已有配置。切换会替换其中的供应商配置，建议先同步到本地。",
     });
 
+  // isPending only flips after a re-render, so fast repeated clicks (or a
+  // confirm button clicked again) would otherwise send duplicate SSH requests.
+  const inFlightRef = useRef(new Set<string>());
+  const runExclusive = (key: string, run: () => void) => {
+    if (inFlightRef.current.has(key)) return;
+    inFlightRef.current.add(key);
+    run();
+  };
+  const releaseExclusive = (key: string) => inFlightRef.current.delete(key);
+
   const restartMutation = useMutation({
     mutationFn: (target: SshConnectionTarget) =>
       providersApi.restartRemoteProcesses(appId, target),
+    onSettled: () => releaseExclusive("restart"),
     onSuccess: (result) => {
       setConfirmRestart(false);
       const count = result.stopped.length;
@@ -338,8 +349,14 @@ export function RemoteProviderPage({
       target: SshConnectionTarget;
     }) =>
       providersApi.applyToRemote(provider.id, appId, target, forceOverwrite),
-    onSuccess: async (result, { target }) => {
-      setConfirmApplyProvider(null);
+    onSettled: () => releaseExclusive("apply"),
+    onSuccess: (result, { target }) => {
+      if (getTargetKey(target) === connectedTargetKey) {
+        queryClient.setQueryData(
+          ["remoteProviderState", appId, connectedTargetKey, connectionVersion],
+          result.remoteState,
+        );
+      }
       toast.success(
         t("remote.applySuccess", {
           defaultValue: "远端已切换到选中的供应商",
@@ -353,13 +370,10 @@ export function RemoteProviderPage({
             label: t("remote.restartProcesses", {
               defaultValue: "重启进程",
             }),
-            onClick: () => restartMutation.mutate(target),
+            onClick: () => startRestart(target),
           },
         },
       );
-      await queryClient.invalidateQueries({
-        queryKey: ["remoteProviderState", appId, connectedTargetKey],
-      });
     },
     onError: (error: unknown) => {
       toast.error(
@@ -376,19 +390,29 @@ export function RemoteProviderPage({
     provider: Provider,
     isRemoteCurrent: boolean,
   ) => {
-    if (isRemoteCurrent || applyMutation.isPending || !connectedTarget) return;
+    if (isRemoteCurrent || !connectedTarget) return;
 
     if (hasUnmanagedRemoteConfig) {
       setConfirmApplyProvider(provider);
       return;
     }
 
-    applyMutation.mutate({
-      provider,
-      forceOverwrite: false,
-      target: connectedTarget,
-    });
+    startApply(provider, false);
   };
+
+  const startApply = (provider: Provider, forceOverwrite: boolean) => {
+    if (!connectedTarget) return;
+    const target = connectedTarget;
+    runExclusive("apply", () =>
+      applyMutation.mutate({ provider, forceOverwrite, target }),
+    );
+  };
+
+  const startRestart = (target: SshConnectionTarget) =>
+    runExclusive("restart", () => restartMutation.mutate(target));
+
+  const startImport = () =>
+    runExclusive("import", () => importMutation.mutate());
 
   const importMutation = useMutation({
     mutationFn: () => {
@@ -397,6 +421,7 @@ export function RemoteProviderPage({
       }
       return providersApi.importRemote(appId, connectedTarget);
     },
+    onSettled: () => releaseExclusive("import"),
     onSuccess: async (result) => {
       toast.success(
         t("remote.importSuccess", {
@@ -711,7 +736,7 @@ export function RemoteProviderPage({
               ) : remoteQuery.data.provider ? (
                 <Button
                   size="sm"
-                  onClick={() => importMutation.mutate()}
+                  onClick={startImport}
                   disabled={importMutation.isPending}
                 >
                   {importMutation.isPending ? (
@@ -740,7 +765,7 @@ export function RemoteProviderPage({
                     className="mt-3"
                     size="sm"
                     variant="outline"
-                    onClick={() => importMutation.mutate()}
+                    onClick={startImport}
                     disabled={importMutation.isPending}
                   >
                     {importMutation.isPending ? (
@@ -916,7 +941,11 @@ export function RemoteProviderPage({
                         <Button
                           size="sm"
                           variant={isRemoteCurrent ? "secondary" : "default"}
-                          disabled={isRemoteCurrent || applyMutation.isPending}
+                          disabled={
+                            isRemoteCurrent ||
+                            applyMutation.isPending ||
+                            remoteQuery.isFetching
+                          }
                           onClick={() =>
                             requestApplyProvider(provider, isRemoteCurrent)
                           }
@@ -952,7 +981,7 @@ export function RemoteProviderPage({
             "remote.confirmOverwriteMessage",
             {
               defaultValue:
-                "继续后会把选中的本地供应商写入远端。当前远端文件会先自动备份；供应商相关配置会被替换，MCP、项目信任等远端设置会保留。",
+                "继续后会把选中的本地供应商写入远端。供应商相关配置会被替换，MCP、项目信任等远端设置会保留。",
             },
           )}`}
           confirmText={t("remote.confirmOverwrite", {
@@ -960,12 +989,8 @@ export function RemoteProviderPage({
           })}
           cancelText={t("common.cancel")}
           onConfirm={() => {
-            if (!connectedTarget) return;
-            applyMutation.mutate({
-              provider: confirmApplyProvider,
-              forceOverwrite: true,
-              target: connectedTarget,
-            });
+            setConfirmApplyProvider(null);
+            startApply(confirmApplyProvider, true);
           }}
           onCancel={() => setConfirmApplyProvider(null)}
         />
@@ -990,7 +1015,7 @@ export function RemoteProviderPage({
         variant="destructive"
         pending={restartMutation.isPending}
         onConfirm={() => {
-          if (connectedTarget) restartMutation.mutate(connectedTarget);
+          if (connectedTarget) startRestart(connectedTarget);
         }}
         onCancel={() => setConfirmRestart(false)}
       />

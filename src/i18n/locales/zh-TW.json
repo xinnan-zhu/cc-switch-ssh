@@ -2050,7 +2050,7 @@
     "applied": "已套用",
     "apply": "切換",
     "confirmOverwriteTitle": "確認覆寫遠端設定？",
-    "confirmOverwriteMessage": "繼續後會把選取的本機供應商寫入遠端。目前遠端檔案會先自動備份；供應商相關設定會被取代，MCP、專案信任等遠端設定會保留。",
+    "confirmOverwriteMessage": "繼續後會把選取的本機供應商寫入遠端。供應商相關設定會被取代，MCP、專案信任等遠端設定會保留。",
     "confirmOverwrite": "確認切換",
     "restartProcesses": "重啟程序",
     "restartProcessesHint": "結束遠端相關程序，讓新設定立即生效",

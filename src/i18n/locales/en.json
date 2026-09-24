@@ -2049,7 +2049,7 @@
     "applied": "Applied",
     "apply": "Switch",
     "confirmOverwriteTitle": "Overwrite remote config?",
-    "confirmOverwriteMessage": "Continuing will write the selected local provider to the remote server. Existing remote files will be backed up first; provider settings are replaced, while remote MCP servers, project trust and other settings are kept.",
+    "confirmOverwriteMessage": "Continuing will write the selected local provider to the remote server. Provider settings are replaced, while remote MCP servers, project trust and other settings are kept.",
     "confirmOverwrite": "Confirm switch",
     "restartProcesses": "Restart processes",
     "restartProcessesHint": "Stop related processes on the remote so the new config takes effect",

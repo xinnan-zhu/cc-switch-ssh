@@ -3,6 +3,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -83,6 +84,8 @@ pub struct RemoteApplyResult {
     pub overwrote_existing_config: bool,
     #[serde(default)]
     pub warnings: Vec<String>,
+    /// Remote state after the write, so callers don't need another round trip.
+    pub remote_state: RemoteProviderState,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -161,10 +164,9 @@ impl RemoteSnapshot {
     }
 }
 
-/// `content: None` removes the remote file (after backing it up).
+/// `content: None` removes the remote file.
 struct RemoteWrite {
     path: &'static str,
-    backup_name: &'static str,
     content: Option<String>,
 }
 
@@ -195,6 +197,8 @@ impl RemoteProviderService {
         ensure_remote_supported(&app_type)?;
         let target = resolve_ssh_target(target)?;
         let host_alias = target.label();
+        let _in_flight = InFlightGuard::acquire(format!("{host_alias}\n{}", app_type.as_str()))
+            .ok_or_else(|| AppError::Message(format!("远端 {host_alias} 正在切换中，请稍候")))?;
 
         let providers = state.db.get_all_providers(app_type.as_str())?;
         let provider = providers
@@ -218,26 +222,20 @@ impl RemoteProviderService {
             }
         }
 
-        let writes = build_remote_writes(state, &app_type, provider, &snapshot)?;
-        let stamp = remote_backup_stamp();
-        let mut written_files = Vec::new();
-        let mut removed_files = Vec::new();
+        let writes: Vec<RemoteWrite> = build_remote_writes(state, &app_type, provider, &snapshot)?
+            .into_iter()
+            .filter(|write| write.content.is_some() || snapshot.get(write.path).is_some())
+            .collect();
+        let (written_files, removed_files) = apply_remote_writes(&target, &writes)?;
 
+        let mut after = snapshot;
         for write in writes {
-            match write.content {
-                Some(content) => written_files.push(write_remote_file(
-                    &target,
-                    write.path,
-                    write.backup_name,
-                    content.as_bytes(),
-                    &stamp,
-                )?),
-                None if snapshot.get(write.path).is_some() => removed_files.push(
-                    remove_remote_file(&target, write.path, write.backup_name, &stamp)?,
-                ),
-                None => {}
+            if let Some((_, content)) = after.files.iter_mut().find(|(path, _)| *path == write.path)
+            {
+                *content = write.content;
             }
         }
+        let remote_state = remote_state_from_snapshot(state, &app_type, host_alias, &after)?;
 
         Ok(RemoteApplyResult {
             host_alias: host_alias.to_string(),
@@ -247,6 +245,7 @@ impl RemoteProviderService {
             removed_files,
             overwrote_existing_config: has_existing_config,
             warnings: Vec::new(),
+            remote_state,
         })
     }
 
@@ -257,45 +256,8 @@ impl RemoteProviderService {
     ) -> Result<RemoteProviderState, AppError> {
         ensure_remote_supported(&app_type)?;
         let target = resolve_ssh_target(target)?;
-        let host_alias = target.label();
-
         let snapshot = read_remote_snapshot(&app_type, &target)?;
-        let read = remote_settings_from_snapshot(&app_type, &snapshot)?;
-        let has_existing_config = snapshot.has_any();
-        let matched_provider_id = find_matching_local_provider(
-            state,
-            &app_type,
-            &snapshot,
-            read.settings_config.as_ref(),
-        )?;
-        let provider = read.settings_config.map(|settings_config| {
-            let mut provider = Provider::with_id(
-                "remote-current".to_string(),
-                format!("远端当前配置 ({host_alias})"),
-                settings_config,
-                None,
-            );
-            provider.category = Some("custom".to_string());
-            provider.notes = Some(format!(
-                "Imported preview from SSH host {host_alias} for {}",
-                app_type.as_str()
-            ));
-            provider
-        });
-        let has_unmanaged_config = has_existing_config && matched_provider_id.is_none();
-
-        Ok(RemoteProviderState {
-            host_alias: host_alias.to_string(),
-            app: app_type.as_str().to_string(),
-            provider,
-            matched_provider_id,
-            files: snapshot.file_statuses(),
-            has_existing_config,
-            has_unmanaged_config,
-            overwrite_warning: has_unmanaged_config
-                .then(|| remote_overwrite_warning(&app_type, host_alias)),
-            warnings: read.warnings,
-        })
+        remote_state_from_snapshot(state, &app_type, target.label(), &snapshot)
     }
 
     pub fn import_remote_provider(
@@ -453,9 +415,71 @@ fn parse_stop_processes_output(output: &str) -> (Vec<RemoteProcessInfo>, Vec<u32
     (stopped, force_killed)
 }
 
+fn remote_state_from_snapshot(
+    state: &AppState,
+    app_type: &AppType,
+    host_alias: &str,
+    snapshot: &RemoteSnapshot,
+) -> Result<RemoteProviderState, AppError> {
+    let read = remote_settings_from_snapshot(app_type, snapshot)?;
+    let has_existing_config = snapshot.has_any();
+    let matched_provider_id =
+        find_matching_local_provider(state, app_type, snapshot, read.settings_config.as_ref())?;
+    let provider = read.settings_config.map(|settings_config| {
+        let mut provider = Provider::with_id(
+            "remote-current".to_string(),
+            format!("远端当前配置 ({host_alias})"),
+            settings_config,
+            None,
+        );
+        provider.category = Some("custom".to_string());
+        provider.notes = Some(format!(
+            "Imported preview from SSH host {host_alias} for {}",
+            app_type.as_str()
+        ));
+        provider
+    });
+    let has_unmanaged_config = has_existing_config && matched_provider_id.is_none();
+
+    Ok(RemoteProviderState {
+        host_alias: host_alias.to_string(),
+        app: app_type.as_str().to_string(),
+        provider,
+        matched_provider_id,
+        files: snapshot.file_statuses(),
+        has_existing_config,
+        has_unmanaged_config,
+        overwrite_warning: has_unmanaged_config
+            .then(|| remote_overwrite_warning(app_type, host_alias)),
+        warnings: read.warnings,
+    })
+}
+
+/// Rejects a second switch to the same host/app while one is still running.
+struct InFlightGuard(String);
+
+impl InFlightGuard {
+    fn in_flight() -> &'static Mutex<HashSet<String>> {
+        static IN_FLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+        IN_FLIGHT.get_or_init(|| Mutex::new(HashSet::new()))
+    }
+
+    fn acquire(key: String) -> Option<Self> {
+        let mut keys = Self::in_flight().lock().unwrap_or_else(|e| e.into_inner());
+        keys.insert(key.clone()).then(|| Self(key))
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        let mut keys = Self::in_flight().lock().unwrap_or_else(|e| e.into_inner());
+        keys.remove(&self.0);
+    }
+}
+
 fn remote_overwrite_warning(app_type: &AppType, host_alias: &str) -> String {
     format!(
-        "远端 {host_alias} 已有未同步的 {} 配置。切换会替换其中的供应商配置（MCP、项目信任等远端设置会保留），建议先同步到本地；写入前会自动备份到远端 ~/.cc-switch/remote-backups。",
+        "远端 {host_alias} 已有未同步的 {} 配置。切换会替换其中的供应商配置（MCP、项目信任等远端设置会保留），如需保留当前配置请先同步到本地。",
         app_type.as_str()
     )
 }
@@ -732,7 +756,6 @@ fn build_remote_writes(
             )?;
             Ok(vec![RemoteWrite {
                 path: CLAUDE_SETTINGS_PATH,
-                backup_name: "claude-settings.json",
                 content: Some(json_pretty(&settings)?),
             }])
         }
@@ -773,13 +796,11 @@ fn build_remote_codex_writes(
     if plan.write_full_auth {
         writes.push(RemoteWrite {
             path: CODEX_AUTH_PATH,
-            backup_name: "codex-auth.json",
             content: Some(json_pretty(auth)?),
         });
     } else if plan.remove_auth_file {
         writes.push(RemoteWrite {
             path: CODEX_AUTH_PATH,
-            backup_name: "codex-auth.json",
             content: None,
         });
     }
@@ -791,7 +812,6 @@ fn build_remote_codex_writes(
         let config_text = anchor_codex_model_provider_id(&config_text, anchor)?;
         writes.push(RemoteWrite {
             path: CODEX_CONFIG_PATH,
-            backup_name: "codex-config.toml",
             content: Some(preserve_remote_codex_tables(&config_text, anchor)?),
         });
     }
@@ -1027,12 +1047,10 @@ fn build_remote_gemini_writes(
     Ok(vec![
         RemoteWrite {
             path: GEMINI_ENV_PATH,
-            backup_name: "gemini-env",
             content: Some(env_text),
         },
         RemoteWrite {
             path: GEMINI_SETTINGS_PATH,
-            backup_name: "gemini-settings.json",
             content: Some(json_pretty(&settings_json)?),
         },
     ])
@@ -1051,11 +1069,115 @@ fn read_remote_snapshot(
     app_type: &AppType,
     target: &ResolvedSshTarget,
 ) -> Result<RemoteSnapshot, AppError> {
-    let files = remote_config_paths(app_type)
-        .iter()
-        .map(|path| Ok((*path, read_remote_file(target, path)?)))
-        .collect::<Result<Vec<_>, AppError>>()?;
-    Ok(RemoteSnapshot { files })
+    let paths = remote_config_paths(app_type);
+    let script = build_read_files_script(paths);
+    let output = run_ssh_command_bytes(target, "sh -s", Some(script.as_bytes()))?;
+    let contents = parse_read_files_output(&output, paths.len())?;
+    Ok(RemoteSnapshot {
+        files: paths.iter().copied().zip(contents).collect(),
+    })
+}
+
+const REMOTE_FILE_HEADER: &str = "__CC_SWITCH_FILE__ ";
+
+/// Prints `<header> <bytes>\n<content>` per file (`-` when missing), so all
+/// files come back in one SSH round trip and are split by exact byte length.
+fn build_read_files_script(paths: &[&str]) -> String {
+    let mut script = String::new();
+    for path in paths {
+        script.push_str(&format!(
+            "f=\"{path}\"; if [ -f \"$f\" ]; then printf '{REMOTE_FILE_HEADER}%s\\n' \"$(wc -c < \"$f\" | tr -d ' ')\"; cat \"$f\"; else printf '{REMOTE_FILE_HEADER}-\\n'; fi\n"
+        ));
+    }
+    script
+}
+
+fn parse_read_files_output(output: &[u8], count: usize) -> Result<Vec<Option<String>>, AppError> {
+    let invalid = || AppError::Message("读取远端配置失败: 返回内容格式异常".to_string());
+    let header = REMOTE_FILE_HEADER.as_bytes();
+    let mut rest = output;
+    let mut files = Vec::with_capacity(count);
+
+    for _ in 0..count {
+        let start = rest
+            .windows(header.len())
+            .position(|window| window == header)
+            .ok_or_else(invalid)?;
+        rest = &rest[start + header.len()..];
+        let line_end = rest.iter().position(|b| *b == b'\n').ok_or_else(invalid)?;
+        let size = std::str::from_utf8(&rest[..line_end])
+            .map_err(|_| invalid())?
+            .trim();
+        rest = &rest[line_end + 1..];
+
+        if size == "-" {
+            files.push(None);
+            continue;
+        }
+        let size: usize = size.parse().map_err(|_| invalid())?;
+        if rest.len() < size {
+            return Err(invalid());
+        }
+        files.push(Some(String::from_utf8_lossy(&rest[..size]).into_owned()));
+        rest = &rest[size..];
+    }
+
+    Ok(files)
+}
+
+/// Applies every write in one SSH round trip; each file is replaced atomically.
+fn apply_remote_writes(
+    target: &ResolvedSshTarget,
+    writes: &[RemoteWrite],
+) -> Result<(Vec<String>, Vec<String>), AppError> {
+    if writes.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let script = build_write_files_script(writes)?;
+    let output = run_ssh_command(target, "sh -s", Some(script.as_bytes()))?;
+
+    let mut written = Vec::new();
+    let mut removed = Vec::new();
+    for line in output.lines() {
+        if let Some(path) = line.strip_prefix("W ") {
+            written.push(path.to_string());
+        } else if let Some(path) = line.strip_prefix("R ") {
+            removed.push(path.to_string());
+        }
+    }
+    Ok((written, removed))
+}
+
+fn build_write_files_script(writes: &[RemoteWrite]) -> Result<String, AppError> {
+    let mut script = String::from(
+        "set -e\numask 077\nwrite_file() { file=\"$1\"; mkdir -p \"${file%/*}\"; tmp=\"$file.tmp.$$\"; printf '%s' \"$2\" > \"$tmp\"; mv \"$tmp\" \"$file\"; chmod 600 \"$file\" 2>/dev/null || true; printf 'W %s\\n' \"$file\"; }\n",
+    );
+    for write in writes {
+        match &write.content {
+            Some(content) => {
+                if content.contains('\0') {
+                    return Err(AppError::Message(format!(
+                        "{} 含有 NUL 字符，无法写入远端",
+                        write.path
+                    )));
+                }
+                script.push_str(&format!(
+                    "write_file \"{}\" {}\n",
+                    write.path,
+                    shell_single_quote(content)
+                ));
+            }
+            None => script.push_str(&format!(
+                "rm -f \"{0}\"; printf 'R %s\\n' \"{0}\"\n",
+                write.path
+            )),
+        }
+    }
+    Ok(script)
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn remote_settings_from_snapshot(
@@ -1194,58 +1316,20 @@ fn json_pretty(value: &Value) -> Result<String, AppError> {
     serde_json::to_string_pretty(value).map_err(|e| AppError::JsonSerialize { source: e })
 }
 
-fn read_remote_file(
-    target: &ResolvedSshTarget,
-    remote_path: &'static str,
-) -> Result<Option<String>, AppError> {
-    const MARKER: &str = "__CC_SWITCH_REMOTE_FILE_EXISTS__\n";
-    let command = format!(
-        "file=\"{remote_path}\"; if [ -f \"$file\" ]; then printf '%s\\n' '__CC_SWITCH_REMOTE_FILE_EXISTS__'; cat \"$file\"; fi"
-    );
-    let output = run_ssh_command(target, &command, None)?;
-    Ok(output.strip_prefix(MARKER).map(str::to_string))
-}
-
-fn write_remote_file(
-    target: &ResolvedSshTarget,
-    remote_path: &'static str,
-    backup_name: &'static str,
-    content: &[u8],
-    stamp: &str,
-) -> Result<String, AppError> {
-    let command = format!(
-        "set -e; umask 077; file=\"{remote_path}\"; dir=\"${{file%/*}}\"; backup_root=\"$HOME/.cc-switch/remote-backups/{stamp}\"; mkdir -p \"$dir\"; if [ -f \"$file\" ]; then mkdir -p \"$backup_root\"; cp \"$file\" \"$backup_root/{backup_name}\"; fi; tmp=\"$file.tmp.$$\"; cat > \"$tmp\"; mv \"$tmp\" \"$file\"; chmod 600 \"$file\" 2>/dev/null || true; printf '%s\\n' \"$file\""
-    );
-    let output = run_ssh_command(target, &command, Some(content))?;
-    Ok(last_output_line(&output).unwrap_or(remote_path).to_string())
-}
-
-fn remove_remote_file(
-    target: &ResolvedSshTarget,
-    remote_path: &'static str,
-    backup_name: &'static str,
-    stamp: &str,
-) -> Result<String, AppError> {
-    let command = format!(
-        "set -e; umask 077; file=\"{remote_path}\"; backup_root=\"$HOME/.cc-switch/remote-backups/{stamp}\"; if [ -f \"$file\" ]; then mkdir -p \"$backup_root\"; cp \"$file\" \"$backup_root/{backup_name}\"; rm -f \"$file\"; fi; printf '%s\\n' \"$file\""
-    );
-    let output = run_ssh_command(target, &command, None)?;
-    Ok(last_output_line(&output).unwrap_or(remote_path).to_string())
-}
-
-fn last_output_line(output: &str) -> Option<&str> {
-    output
-        .lines()
-        .last()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-}
-
 fn run_ssh_command(
     target: &ResolvedSshTarget,
     remote_command: &str,
     stdin: Option<&[u8]>,
 ) -> Result<String, AppError> {
+    let output = run_ssh_command_bytes(target, remote_command, stdin)?;
+    Ok(String::from_utf8_lossy(&output).into_owned())
+}
+
+fn run_ssh_command_bytes(
+    target: &ResolvedSshTarget,
+    remote_command: &str,
+    stdin: Option<&[u8]>,
+) -> Result<Vec<u8>, AppError> {
     let mut command = Command::new("ssh");
     hide_ssh_console_window(&mut command);
     configure_ssh_command(&mut command, target, remote_command);
@@ -1283,7 +1367,7 @@ fn run_ssh_command(
         }));
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    Ok(output.stdout)
 }
 
 #[cfg(windows)]
@@ -1314,6 +1398,7 @@ fn configure_ssh_command(command: &mut Command, target: &ResolvedSshTarget, remo
     } else {
         command.args(["-o", "BatchMode=yes", "-o", "NumberOfPasswordPrompts=0"]);
     }
+    configure_ssh_multiplexing(command);
 
     command
         .arg("--")
@@ -1380,9 +1465,36 @@ fn askpass_script_content() -> &'static str {
     "@echo off\r\necho %CC_SWITCH_SSH_PASSWORD%\r\n"
 }
 
-fn remote_backup_stamp() -> String {
-    chrono::Local::now().format("%Y%m%d%H%M%S").to_string()
+/// Reuses one SSH connection per host for a couple of minutes, so reading,
+/// writing and re-inspecting don't each pay for a full handshake.
+#[cfg(unix)]
+fn configure_ssh_multiplexing(command: &mut Command) {
+    let dir = crate::config::get_home_dir().join(".ssh");
+    if !dir.is_dir() {
+        if fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+    }
+    // ssh splits option values on whitespace; skip rather than risk a bad path.
+    let control_path = dir.join("cc-switch-%C");
+    let control_path = control_path.to_string_lossy();
+    if control_path.chars().any(char::is_whitespace) {
+        return;
+    }
+    command.args([
+        "-o".to_string(),
+        "ControlMaster=auto".to_string(),
+        "-o".to_string(),
+        format!("ControlPath={control_path}"),
+        "-o".to_string(),
+        "ControlPersist=120".to_string(),
+    ]);
 }
+
+// Windows OpenSSH has no ControlMaster support.
+#[cfg(not(unix))]
+fn configure_ssh_multiplexing(_command: &mut Command) {}
 
 fn is_safe_ssh_alias(alias: &str) -> bool {
     !alias.trim().is_empty()
@@ -1731,17 +1843,14 @@ model_provider = "packy"
         let writes = vec![
             RemoteWrite {
                 path: CODEX_AUTH_PATH,
-                backup_name: "codex-auth.json",
                 content: None,
             },
             RemoteWrite {
                 path: CODEX_CONFIG_PATH,
-                backup_name: "codex-config.toml",
                 content: Some("model = \"gpt-5.5\"\n".to_string()),
             },
             RemoteWrite {
                 path: CLAUDE_SETTINGS_PATH,
-                backup_name: "claude-settings.json",
                 content: Some("{\n  \"env\": {\n    \"A\": \"1\"\n  }\n}".to_string()),
             },
         ];
@@ -1750,7 +1859,6 @@ model_provider = "packy"
 
         let mismatched = [RemoteWrite {
             path: CODEX_CONFIG_PATH,
-            backup_name: "codex-config.toml",
             content: Some("model = \"gpt-5.4\"\n".to_string()),
         }];
         assert!(!remote_writes_match_snapshot(&mismatched, &snapshot));
@@ -1846,6 +1954,77 @@ trust_level = "trusted"
             provider
         );
         Ok(())
+    }
+
+    #[cfg(unix)]
+    fn run_local_sh(home: &Path, script: &str) -> Vec<u8> {
+        let mut child = Command::new("sh")
+            .arg("-s")
+            .env("HOME", home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(script.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        output.stdout
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn batched_write_and_read_scripts_round_trip_through_sh() {
+        let home = tempfile::tempdir().unwrap();
+        let tricky = "model = \"it's $HOME `x` \\\\ \\n\"\n# 中文\nlast line without newline";
+        fs::create_dir_all(home.path().join(".codex")).unwrap();
+        fs::write(home.path().join(".codex/auth.json"), "{\"old\":true}").unwrap();
+
+        let writes = [
+            RemoteWrite {
+                path: CODEX_CONFIG_PATH,
+                content: Some(tricky.to_string()),
+            },
+            RemoteWrite {
+                path: CODEX_AUTH_PATH,
+                content: None,
+            },
+        ];
+        let output = run_local_sh(home.path(), &build_write_files_script(&writes).unwrap());
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("W ") && output.contains("R "));
+        assert_eq!(
+            fs::read_to_string(home.path().join(".codex/config.toml")).unwrap(),
+            tricky
+        );
+        assert!(!home.path().join(".codex/auth.json").exists());
+
+        let paths = [CODEX_AUTH_PATH, CODEX_CONFIG_PATH];
+        let output = run_local_sh(home.path(), &build_read_files_script(&paths));
+        assert_eq!(
+            parse_read_files_output(&output, paths.len()).unwrap(),
+            vec![None, Some(tricky.to_string())]
+        );
+    }
+
+    #[test]
+    fn parse_read_files_output_rejects_truncated_content() {
+        let output = format!("{REMOTE_FILE_HEADER}10\nshort");
+        assert!(parse_read_files_output(output.as_bytes(), 1).is_err());
+        assert!(parse_read_files_output(b"", 1).is_err());
+    }
+
+    #[test]
+    fn in_flight_guard_blocks_duplicate_until_dropped() {
+        let first = InFlightGuard::acquire("test-host\ncodex".to_string());
+        assert!(first.is_some());
+        assert!(InFlightGuard::acquire("test-host\ncodex".to_string()).is_none());
+        drop(first);
+        assert!(InFlightGuard::acquire("test-host\ncodex".to_string()).is_some());
     }
 
     #[test]

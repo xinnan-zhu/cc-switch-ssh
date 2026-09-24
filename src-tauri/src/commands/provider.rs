@@ -7,7 +7,9 @@ use crate::commands::xai_oauth::XaiOAuthState;
 use crate::error::AppError;
 use crate::provider::{ClaudeDesktopMode, Provider};
 use crate::services::{
-    EndpointLatency, ProviderService, ProviderSortUpdate, SpeedtestService, SwitchResult,
+    EndpointLatency, ProviderService, ProviderSortUpdate, RemoteApplyResult, RemoteImportResult,
+    RemoteProviderService, RemoteProviderState, SpeedtestService, SshConnectionTarget,
+    SshHostEntry, SwitchResult,
 };
 use crate::store::AppState;
 use std::str::FromStr;
@@ -130,6 +132,76 @@ pub async fn switch_provider(
     })
     .await
     .map_err(|e| format!("供应商切换任务执行失败: {e}"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_ssh_config_hosts() -> Result<Vec<SshHostEntry>, String> {
+    tauri::async_runtime::spawn_blocking(RemoteProviderService::list_ssh_hosts)
+        .await
+        .map_err(|e| format!("读取 SSH Host 失败: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn apply_provider_to_remote(
+    app_handle: tauri::AppHandle,
+    app: String,
+    id: String,
+    target: SshConnectionTarget,
+    force_overwrite: Option<bool>,
+) -> Result<RemoteApplyResult, String> {
+    let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle
+            .try_state::<AppState>()
+            .ok_or_else(|| "应用状态不可用".to_string())?;
+        RemoteProviderService::apply_provider_to_remote(
+            state.inner(),
+            app_type,
+            &id,
+            &target,
+            force_overwrite.unwrap_or(false),
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("远端切换失败: {e}"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn inspect_remote_provider(
+    app_handle: tauri::AppHandle,
+    app: String,
+    target: SshConnectionTarget,
+) -> Result<RemoteProviderState, String> {
+    let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle
+            .try_state::<AppState>()
+            .ok_or_else(|| "应用状态不可用".to_string())?;
+        RemoteProviderService::inspect_remote_provider(state.inner(), app_type, &target)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("读取远端配置失败: {e}"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn import_remote_provider(
+    app_handle: tauri::AppHandle,
+    app: String,
+    target: SshConnectionTarget,
+) -> Result<RemoteImportResult, String> {
+    let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle
+            .try_state::<AppState>()
+            .ok_or_else(|| "应用状态不可用".to_string())?;
+        RemoteProviderService::import_remote_provider(state.inner(), app_type, &target)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("下载远端配置失败: {e}"))?
 }
 
 fn import_default_config_internal(state: &AppState, app_type: AppType) -> Result<bool, AppError> {

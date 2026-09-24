@@ -3829,13 +3829,13 @@ pub fn strip_codex_mcp_servers_from_settings(settings: &mut Value) -> Result<(),
 /// committing any state, then execute the same computation for the real
 /// write. Keeping validation and execution in one builder makes it
 /// impossible for the two to drift apart.
-struct CodexLiveWritePlan {
-    write_full_auth: bool,
-    config_text: Option<String>,
-    remove_auth_file: bool,
+pub(crate) struct CodexLiveWritePlan {
+    pub(crate) write_full_auth: bool,
+    pub(crate) config_text: Option<String>,
+    pub(crate) remove_auth_file: bool,
 }
 
-fn plan_codex_live_write(
+pub(crate) fn plan_codex_live_write(
     category: Option<&str>,
     auth: &Value,
     config_text: Option<&str>,

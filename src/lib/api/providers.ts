@@ -25,6 +25,61 @@ export interface OpenTerminalOptions {
   cwd?: string;
 }
 
+export interface SshHostEntry {
+  alias: string;
+  hostName?: string;
+  user?: string;
+  port?: string;
+  source?: string;
+}
+
+export type SshConnectionTarget =
+  | {
+      type: "config";
+      alias: string;
+    }
+  | {
+      type: "manual";
+      host: string;
+      user?: string;
+      port?: number;
+      password?: string;
+    };
+
+export interface RemoteApplyResult {
+  hostAlias: string;
+  app: AppId;
+  providerId: string;
+  writtenFiles: string[];
+  removedFiles: string[];
+  overwroteExistingConfig: boolean;
+  warnings: string[];
+}
+
+export interface RemoteConfigFile {
+  path: string;
+  exists: boolean;
+  bytes: number;
+}
+
+export interface RemoteProviderState {
+  hostAlias: string;
+  app: AppId;
+  provider?: Provider | null;
+  matchedProviderId?: string | null;
+  files: RemoteConfigFile[];
+  hasExistingConfig: boolean;
+  hasUnmanagedConfig: boolean;
+  overwriteWarning?: string | null;
+  warnings: string[];
+}
+
+export interface RemoteImportResult {
+  hostAlias: string;
+  app: AppId;
+  provider: Provider;
+}
+
 export interface ClaudeDesktopStatus {
   supported: boolean;
   configured: boolean;
@@ -89,6 +144,38 @@ export const providersApi = {
 
   async switch(id: string, appId: AppId): Promise<SwitchResult> {
     return await invoke("switch_provider", { id, app: appId });
+  },
+
+  async getSshHosts(): Promise<SshHostEntry[]> {
+    return await invoke("get_ssh_config_hosts");
+  },
+
+  async applyToRemote(
+    id: string,
+    appId: AppId,
+    target: SshConnectionTarget,
+    forceOverwrite = false,
+  ): Promise<RemoteApplyResult> {
+    return await invoke("apply_provider_to_remote", {
+      id,
+      app: appId,
+      target,
+      forceOverwrite,
+    });
+  },
+
+  async inspectRemote(
+    appId: AppId,
+    target: SshConnectionTarget,
+  ): Promise<RemoteProviderState> {
+    return await invoke("inspect_remote_provider", { app: appId, target });
+  },
+
+  async importRemote(
+    appId: AppId,
+    target: SshConnectionTarget,
+  ): Promise<RemoteImportResult> {
+    return await invoke("import_remote_provider", { app: appId, target });
   },
 
   async importDefault(appId: AppId): Promise<boolean> {

@@ -298,6 +298,17 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
+        // cc-switch-ssh builds shipped a different v13 migration, so databases
+        // upgraded from them skipped upstream's v12 -> v13 columns.
+        for table in ["proxy_request_logs", "usage_daily_rollups"] {
+            Self::add_column_if_missing(
+                conn,
+                table,
+                "input_token_semantics",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
+        }
+
         // 18. Session Log Sync 表 (会话日志同步状态)
         //
         // last_byte_offset：Claude 路径的字节游标（seek 增量读）；NULL 表示

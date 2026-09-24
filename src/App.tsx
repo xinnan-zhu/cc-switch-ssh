@@ -27,6 +27,7 @@ import {
   LayoutDashboard,
   Loader2,
   RefreshCw,
+  Server,
 } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { Provider, VisibleApps } from "@/types";
@@ -107,6 +108,7 @@ import ToolsPanel from "@/components/openclaw/ToolsPanel";
 import AgentsDefaultsPanel from "@/components/openclaw/AgentsDefaultsPanel";
 import OpenClawHealthBanner from "@/components/openclaw/OpenClawHealthBanner";
 import HermesMemoryPanel from "@/components/hermes/HermesMemoryPanel";
+import { RemoteProviderPage } from "@/components/remote/RemoteProviderPage";
 import {
   APP_IDS,
   DEFAULT_VISIBLE_APPS,
@@ -119,6 +121,7 @@ type View =
   | "prompts"
   | "skills"
   | "skillsDiscovery"
+  | "remote"
   | "mcp"
   | "agents"
   | "universal"
@@ -154,6 +157,7 @@ const VALID_VIEWS: View[] = [
   "prompts",
   "skills",
   "skillsDiscovery",
+  "remote",
   "mcp",
   "agents",
   "universal",
@@ -336,6 +340,14 @@ function App() {
     sharedFeatureApp === "pi" ||
     sharedFeatureApp === "mcode";
   const hasMcpSupport = sharedFeatureApp !== "pi";
+  const hasRemoteSupport =
+    activeApp === "claude" || activeApp === "codex" || activeApp === "gemini";
+
+  useEffect(() => {
+    if (currentView === "remote" && !hasRemoteSupport) {
+      setCurrentView("providers");
+    }
+  }, [currentView, hasRemoteSupport]);
 
   const {
     addProvider,
@@ -1076,6 +1088,15 @@ function App() {
               onSourceChange={setSkillsDiscoverySource}
             />
           );
+        case "remote":
+          return (
+            <RemoteProviderPage
+              appId={activeApp}
+              providers={providers}
+              currentProviderId={currentProviderId}
+              isLoading={isLoading}
+            />
+          );
         case "mcp":
           return (
             <UnifiedMcpPanel
@@ -1333,6 +1354,7 @@ function App() {
                     })}
                   {currentView === "skills" && t("skills.title")}
                   {currentView === "skillsDiscovery" && t("skills.title")}
+                  {currentView === "remote" && t("remote.title")}
                   {currentView === "mcp" && t("mcp.unifiedPanel.title")}
                   {currentView === "agents" && t("agents.title")}
                   {currentView === "universal" &&
@@ -1723,6 +1745,21 @@ function App() {
                                 title={t("prompts.manage")}
                               >
                                 <Book className="w-4 h-4" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => setCurrentView("remote")}
+                                className={cn(
+                                  "text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/5",
+                                  "transition-all duration-200 ease-in-out overflow-hidden",
+                                  hasRemoteSupport
+                                    ? "opacity-100 w-8 scale-100 px-2"
+                                    : "opacity-0 w-0 scale-75 pointer-events-none px-0 -ml-1",
+                                )}
+                                title={t("remote.manage")}
+                              >
+                                <Server className="flex-shrink-0 w-4 h-4" />
                               </Button>
                               <Button
                                 variant="ghost"

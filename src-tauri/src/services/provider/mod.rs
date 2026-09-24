@@ -6,6 +6,7 @@ mod endpoints;
 mod gemini_auth;
 mod live;
 mod pi;
+mod remote;
 mod usage;
 
 use indexmap::IndexMap;
@@ -28,6 +29,10 @@ pub use live::{
     import_opencode_providers_from_live, read_live_settings,
     should_import_default_config_on_startup, sync_current_to_live,
     update_toml_common_config_snippet,
+};
+pub use remote::{
+    RemoteApplyResult, RemoteImportResult, RemoteProviderService, RemoteProviderState,
+    SshConnectionTarget, SshHostEntry,
 };
 
 pub fn import_pi_providers_from_live(state: &AppState) -> Result<usize, AppError> {

@@ -22,11 +22,11 @@ use crate::store::AppState;
 use super::gemini_auth::{detect_gemini_auth_type, GeminiAuthType};
 use super::live::{build_effective_settings_with_common_config, sanitize_claude_settings_for_live};
 
-const CLAUDE_SETTINGS_PATH: &str = "$HOME/.claude/settings.json";
-const CODEX_AUTH_PATH: &str = "$HOME/.codex/auth.json";
-const CODEX_CONFIG_PATH: &str = "$HOME/.codex/config.toml";
-const GEMINI_ENV_PATH: &str = "$HOME/.gemini/.env";
-const GEMINI_SETTINGS_PATH: &str = "$HOME/.gemini/settings.json";
+pub(super) const CLAUDE_SETTINGS_PATH: &str = "$HOME/.claude/settings.json";
+pub(super) const CODEX_AUTH_PATH: &str = "$HOME/.codex/auth.json";
+pub(super) const CODEX_CONFIG_PATH: &str = "$HOME/.codex/config.toml";
+pub(super) const GEMINI_ENV_PATH: &str = "$HOME/.gemini/.env";
+pub(super) const GEMINI_SETTINGS_PATH: &str = "$HOME/.gemini/settings.json";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -42,7 +42,7 @@ pub struct SshHostEntry {
     pub source: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SshConnectionTarget {
     #[serde(default, rename = "type")]
@@ -55,20 +55,20 @@ pub struct SshConnectionTarget {
     pub user: Option<String>,
     #[serde(default)]
     pub port: Option<u16>,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub password: Option<String>,
 }
 
 #[derive(Debug, Clone)]
-struct ResolvedSshTarget {
-    label: String,
-    connect_target: String,
-    port: Option<u16>,
-    password: Option<String>,
+pub(super) struct ResolvedSshTarget {
+    pub(super) label: String,
+    pub(super) connect_target: String,
+    pub(super) port: Option<u16>,
+    pub(super) password: Option<String>,
 }
 
 impl ResolvedSshTarget {
-    fn label(&self) -> &str {
+    pub(super) fn label(&self) -> &str {
         &self.label
     }
 }
@@ -109,6 +109,9 @@ pub struct RemoteProviderState {
     pub overwrite_warning: Option<String>,
     #[serde(default)]
     pub warnings: Vec<String>,
+    /// The remote CLI points at the local gateway through the SSH tunnel.
+    #[serde(default)]
+    pub via_gateway: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -136,19 +139,19 @@ pub struct RemoteRestartResult {
 }
 
 /// Contents of the remote live config files for one app; `None` means missing.
-struct RemoteSnapshot {
-    files: Vec<(&'static str, Option<String>)>,
+pub(super) struct RemoteSnapshot {
+    pub(super) files: Vec<(&'static str, Option<String>)>,
 }
 
 impl RemoteSnapshot {
-    fn get(&self, path: &str) -> Option<&str> {
+    pub(super) fn get(&self, path: &str) -> Option<&str> {
         self.files
             .iter()
             .find(|(file_path, _)| *file_path == path)
             .and_then(|(_, content)| content.as_deref())
     }
 
-    fn has_any(&self) -> bool {
+    pub(super) fn has_any(&self) -> bool {
         self.files.iter().any(|(_, content)| content.is_some())
     }
 
@@ -165,9 +168,9 @@ impl RemoteSnapshot {
 }
 
 /// `content: None` removes the remote file.
-struct RemoteWrite {
-    path: &'static str,
-    content: Option<String>,
+pub(super) struct RemoteWrite {
+    pub(super) path: &'static str,
+    pub(super) content: Option<String>,
 }
 
 struct RemoteSettingsRead {
@@ -207,7 +210,10 @@ impl RemoteProviderService {
 
         let snapshot = read_remote_snapshot(&app_type, &target)?;
         let has_existing_config = snapshot.has_any();
-        if has_existing_config && !force_overwrite {
+        if has_existing_config
+            && !force_overwrite
+            && !super::remote_gateway::snapshot_uses_gateway(&state.db, host_alias, &snapshot)
+        {
             let remote_settings = remote_settings_from_snapshot(&app_type, &snapshot)?;
             let matched = find_matching_local_provider(
                 state,
@@ -415,7 +421,7 @@ fn parse_stop_processes_output(output: &str) -> (Vec<RemoteProcessInfo>, Vec<u32
     (stopped, force_killed)
 }
 
-fn remote_state_from_snapshot(
+pub(super) fn remote_state_from_snapshot(
     state: &AppState,
     app_type: &AppType,
     host_alias: &str,
@@ -439,7 +445,8 @@ fn remote_state_from_snapshot(
         ));
         provider
     });
-    let has_unmanaged_config = has_existing_config && matched_provider_id.is_none();
+    let via_gateway = super::remote_gateway::snapshot_uses_gateway(&state.db, host_alias, snapshot);
+    let has_unmanaged_config = has_existing_config && matched_provider_id.is_none() && !via_gateway;
 
     Ok(RemoteProviderState {
         host_alias: host_alias.to_string(),
@@ -452,11 +459,12 @@ fn remote_state_from_snapshot(
         overwrite_warning: has_unmanaged_config
             .then(|| remote_overwrite_warning(app_type, host_alias)),
         warnings: read.warnings,
+        via_gateway,
     })
 }
 
 /// Rejects a second switch to the same host/app while one is still running.
-struct InFlightGuard(String);
+pub(super) struct InFlightGuard(String);
 
 impl InFlightGuard {
     fn in_flight() -> &'static Mutex<HashSet<String>> {
@@ -464,7 +472,7 @@ impl InFlightGuard {
         IN_FLIGHT.get_or_init(|| Mutex::new(HashSet::new()))
     }
 
-    fn acquire(key: String) -> Option<Self> {
+    pub(super) fn acquire(key: String) -> Option<Self> {
         let mut keys = Self::in_flight().lock().unwrap_or_else(|e| e.into_inner());
         keys.insert(key.clone()).then(|| Self(key))
     }
@@ -491,7 +499,7 @@ fn remote_overwrite_block_message(app_type: &AppType, host_alias: &str) -> Strin
     )
 }
 
-fn ensure_remote_supported(app_type: &AppType) -> Result<(), AppError> {
+pub(super) fn ensure_remote_supported(app_type: &AppType) -> Result<(), AppError> {
     if matches!(app_type, AppType::Claude | AppType::Codex | AppType::Gemini) {
         return Ok(());
     }
@@ -502,7 +510,9 @@ fn ensure_remote_supported(app_type: &AppType) -> Result<(), AppError> {
     )))
 }
 
-fn resolve_ssh_target(target: &SshConnectionTarget) -> Result<ResolvedSshTarget, AppError> {
+pub(super) fn resolve_ssh_target(
+    target: &SshConnectionTarget,
+) -> Result<ResolvedSshTarget, AppError> {
     let is_manual = target
         .target_type
         .as_deref()
@@ -767,7 +777,7 @@ fn build_remote_writes(
 
 /// Mirrors the local Codex switch plan (bearer-token injection, auth.json
 /// ownership, safety gates) against the remote files.
-fn build_remote_codex_writes(
+pub(super) fn build_remote_codex_writes(
     provider: &Provider,
     effective_settings: &Value,
     snapshot: &RemoteSnapshot,
@@ -853,7 +863,7 @@ fn preserve_remote_codex_tables(
 /// Replaces only the provider-owned part of the remote settings.json (endpoint,
 /// credentials, model mapping) and keeps the host's other settings. Local
 /// common-config keys fill in only what the remote doesn't set itself.
-fn merge_remote_claude_settings(
+pub(super) fn merge_remote_claude_settings(
     provider_settings: &Value,
     remote_settings_text: Option<&str>,
 ) -> Result<Value, AppError> {
@@ -923,7 +933,7 @@ fn overlay_claude_settings(
     }
 }
 
-fn active_codex_model_provider_id(doc: &DocumentMut) -> Option<String> {
+pub(super) fn active_codex_model_provider_id(doc: &DocumentMut) -> Option<String> {
     doc.get("model_provider")
         .and_then(|item| item.as_str())
         .map(str::trim)
@@ -1056,7 +1066,7 @@ fn build_remote_gemini_writes(
     ])
 }
 
-fn remote_config_paths(app_type: &AppType) -> &'static [&'static str] {
+pub(super) fn remote_config_paths(app_type: &AppType) -> &'static [&'static str] {
     match app_type {
         AppType::Claude => &[CLAUDE_SETTINGS_PATH],
         AppType::Codex => &[CODEX_AUTH_PATH, CODEX_CONFIG_PATH],
@@ -1065,7 +1075,7 @@ fn remote_config_paths(app_type: &AppType) -> &'static [&'static str] {
     }
 }
 
-fn read_remote_snapshot(
+pub(super) fn read_remote_snapshot(
     app_type: &AppType,
     target: &ResolvedSshTarget,
 ) -> Result<RemoteSnapshot, AppError> {
@@ -1126,7 +1136,7 @@ fn parse_read_files_output(output: &[u8], count: usize) -> Result<Vec<Option<Str
 }
 
 /// Applies every write in one SSH round trip; each file is replaced atomically.
-fn apply_remote_writes(
+pub(super) fn apply_remote_writes(
     target: &ResolvedSshTarget,
     writes: &[RemoteWrite],
 ) -> Result<(Vec<String>, Vec<String>), AppError> {
@@ -1278,14 +1288,14 @@ fn parse_remote_json(path: &str, content: &str) -> Result<Value, AppError> {
         .map_err(|e| AppError::Message(format!("解析远端 {path} 失败: {e}")))
 }
 
-fn parse_json_object_or_empty(content: &str) -> Value {
+pub(super) fn parse_json_object_or_empty(content: &str) -> Value {
     serde_json::from_str::<Value>(content)
         .ok()
         .filter(Value::is_object)
         .unwrap_or_else(|| json!({}))
 }
 
-fn set_gemini_selected_type(settings: &mut Value, selected_type: &str) {
+pub(super) fn set_gemini_selected_type(settings: &mut Value, selected_type: &str) {
     let Some(root) = settings.as_object_mut() else {
         *settings = json!({});
         return set_gemini_selected_type(settings, selected_type);
@@ -1312,11 +1322,11 @@ fn set_gemini_selected_type(settings: &mut Value, selected_type: &str) {
     }
 }
 
-fn json_pretty(value: &Value) -> Result<String, AppError> {
+pub(super) fn json_pretty(value: &Value) -> Result<String, AppError> {
     serde_json::to_string_pretty(value).map_err(|e| AppError::JsonSerialize { source: e })
 }
 
-fn run_ssh_command(
+pub(super) fn run_ssh_command(
     target: &ResolvedSshTarget,
     remote_command: &str,
     stdin: Option<&[u8]>,
@@ -1406,7 +1416,7 @@ fn configure_ssh_command(command: &mut Command, target: &ResolvedSshTarget, remo
         .arg(remote_command);
 }
 
-fn configure_ssh_password(
+pub(super) fn configure_ssh_password(
     command: &mut Command,
     target: &ResolvedSshTarget,
 ) -> Result<Option<tempfile::NamedTempFile>, AppError> {

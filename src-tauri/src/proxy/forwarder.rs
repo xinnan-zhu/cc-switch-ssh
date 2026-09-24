@@ -1634,6 +1634,16 @@ impl RequestForwarder {
             mapped_body
         };
 
+        // cc-switch-ssh: a remote Codex keeps whatever `model` it was pushed
+        // with, which goes stale when its route or the local provider changes.
+        if matches!(app_type, AppType::Codex)
+            && !codex_responses_to_chat
+            && !codex_responses_to_anthropic
+            && super::remote_gateway::current_origin().is_some()
+        {
+            super::providers::apply_codex_upstream_model(provider, &mut request_body);
+        }
+
         // Native Responses passthrough to a strict third-party gateway (xAI).
         // One gate so rebase conflicts stay here plus the isolate file, not
         // scattered across sanitizers. Flatten namespaces first; then apply

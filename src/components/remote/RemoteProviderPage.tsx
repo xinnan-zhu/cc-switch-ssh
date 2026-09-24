@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
   CheckCircle2,
   Download,
   Loader2,
+  Network,
   RefreshCw,
   RotateCcw,
   Server,
@@ -16,11 +17,14 @@ import type { Provider } from "@/types";
 import type { AppId } from "@/lib/api";
 import {
   providersApi,
+  type RemoteGatewayApplyResult,
+  type RemoteGatewayState,
   type RemoteProviderState,
   type SshConnectionTarget,
   type SshHostEntry,
 } from "@/lib/api/providers";
 import { extractErrorMessage } from "@/utils/errorUtils";
+import { proxyKeys } from "@/lib/query/proxy";
 import { cn } from "@/lib/utils";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ProviderIcon } from "@/components/ProviderIcon";
@@ -36,6 +40,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { RemoteGatewayCard } from "./RemoteGatewayCard";
 
 interface RemoteProviderPageProps {
   appId: AppId;
@@ -142,6 +147,10 @@ const getProviderSummary = (provider: Provider, appId: AppId) => {
   return provider.notes || "";
 };
 
+/** Subscription logins stay on this machine and can't serve a remote host. */
+const isLocalLoginProvider = (provider: Provider) =>
+  provider.category === "official";
+
 export function RemoteProviderPage({
   appId,
   providers,
@@ -165,6 +174,8 @@ export function RemoteProviderPage({
   const [confirmApplyProvider, setConfirmApplyProvider] =
     useState<Provider | null>(null);
   const [confirmRestart, setConfirmRestart] = useState(false);
+  const [confirmDisableGateway, setConfirmDisableGateway] =
+    useState<Provider | null>(null);
 
   const hostsQuery = useQuery({
     queryKey: ["sshConfigHosts"],
@@ -243,6 +254,23 @@ export function RemoteProviderPage({
     },
     enabled: isSupported && Boolean(connectedTarget),
   });
+
+  const gatewayQueryKey = ["remoteGatewayState", appId, connectedTargetKey];
+  const gatewayQuery = useQuery<RemoteGatewayState>({
+    queryKey: gatewayQueryKey,
+    queryFn: () => {
+      if (!connectedTarget) {
+        throw new Error("SSH target is not connected");
+      }
+      return providersApi.getRemoteGatewayState(appId, connectedTarget);
+    },
+    enabled: isSupported && Boolean(connectedTarget),
+    refetchInterval: (query) => (query.state.data?.enabled ? 3000 : false),
+  });
+  const gatewayEnabled = gatewayQuery.data?.enabled ?? false;
+  const gatewayProviderId = gatewayQuery.data?.providerId ?? null;
+  const isPasswordTarget =
+    connectedTarget?.type === "manual" && Boolean(connectedTarget.password);
 
   const localProviders = useMemo(() => Object.values(providers), [providers]);
 
@@ -445,6 +473,204 @@ export function RemoteProviderPage({
     },
   });
 
+  const storeGatewayResult = (
+    target: SshConnectionTarget,
+    result: RemoteGatewayApplyResult,
+  ) => {
+    const targetKey = getTargetKey(target);
+    queryClient.setQueryData(
+      ["remoteGatewayState", appId, targetKey],
+      result.state,
+    );
+    if (result.remoteState && targetKey === connectedTargetKey) {
+      queryClient.setQueryData(
+        ["remoteProviderState", appId, connectedTargetKey, connectionVersion],
+        result.remoteState,
+      );
+    }
+  };
+
+  const restartAction = (target: SshConnectionTarget) => ({
+    label: t("remote.restartProcesses", { defaultValue: "重启进程" }),
+    onClick: () => startRestart(target),
+  });
+
+  const invalidateProxyQueries = () => {
+    void queryClient.invalidateQueries({ queryKey: proxyKeys.status });
+    void queryClient.invalidateQueries({ queryKey: proxyKeys.globalConfig });
+  };
+
+  const gatewayError = (error: unknown) =>
+    toast.error(
+      t("remote.gateway.failed", {
+        defaultValue: "本机网关操作失败: {{error}}",
+        error: extractErrorMessage(error),
+      }),
+      { duration: 8000 },
+    );
+
+  const enableGatewayMutation = useMutation({
+    mutationFn: ({
+      target,
+      providerId,
+      remotePort,
+    }: {
+      target: SshConnectionTarget;
+      providerId: string | null;
+      remotePort?: number;
+    }) =>
+      providersApi.enableRemoteGateway(appId, target, providerId, remotePort),
+    onSettled: () => releaseExclusive("gateway"),
+    onSuccess: (result, { target }) => {
+      storeGatewayResult(target, result);
+      invalidateProxyQueries();
+      toast.success(
+        t("remote.gateway.enabled", {
+          defaultValue: "{{host}} 已改为经本机网关访问",
+          host: result.state.hostKey,
+        }),
+        {
+          description:
+            result.writtenFiles.length > 0
+              ? t("remote.gateway.enabledHint", {
+                  defaultValue: "重启远端进程后生效，之后切换供应商无需重启。",
+                })
+              : undefined,
+          duration: 10000,
+          action:
+            result.writtenFiles.length > 0 ? restartAction(target) : undefined,
+        },
+      );
+    },
+    onError: gatewayError,
+  });
+
+  const gatewayRouteMutation = useMutation({
+    mutationFn: ({
+      target,
+      providerId,
+    }: {
+      target: SshConnectionTarget;
+      providerId: string | null;
+    }) => providersApi.setRemoteGatewayProvider(appId, target, providerId),
+    onSettled: () => releaseExclusive("gateway"),
+    onSuccess: (result, { target }) => {
+      storeGatewayResult(target, result);
+      toast.success(
+        t("remote.gateway.routeSwitched", {
+          defaultValue: "已切换，下一次请求生效",
+        }),
+      );
+    },
+    onError: gatewayError,
+  });
+
+  const disableGatewayMutation = useMutation({
+    mutationFn: ({
+      target,
+      provider,
+    }: {
+      target: SshConnectionTarget;
+      provider: Provider;
+    }) => providersApi.disableRemoteGateway(provider.id, appId, target),
+    onSettled: () => releaseExclusive("gateway"),
+    onSuccess: async (result, { target }) => {
+      if (getTargetKey(target) === connectedTargetKey) {
+        queryClient.setQueryData(
+          ["remoteProviderState", appId, connectedTargetKey, connectionVersion],
+          result.remoteState,
+        );
+      }
+      await queryClient.invalidateQueries({
+        queryKey: ["remoteGatewayState", appId, getTargetKey(target)],
+      });
+      toast.success(
+        t("remote.gateway.disabled", {
+          defaultValue: "已改回直连，远端使用 {{provider}}",
+          provider: providers[result.providerId]?.name ?? result.providerId,
+        }),
+        { duration: 10000, action: restartAction(target) },
+      );
+    },
+    onError: gatewayError,
+  });
+
+  const reconnectGatewayMutation = useMutation({
+    mutationFn: (target: SshConnectionTarget) =>
+      providersApi.reconnectRemoteGateway(appId, target),
+    onSettled: () => releaseExclusive("gateway"),
+    onSuccess: (state, target) => {
+      queryClient.setQueryData(
+        ["remoteGatewayState", appId, getTargetKey(target)],
+        state,
+      );
+      invalidateProxyQueries();
+    },
+    onError: gatewayError,
+  });
+
+  const gatewayBusy =
+    enableGatewayMutation.isPending ||
+    gatewayRouteMutation.isPending ||
+    disableGatewayMutation.isPending ||
+    reconnectGatewayMutation.isPending;
+
+  const startEnableGateway = (remotePort?: number) => {
+    if (!connectedTarget) return;
+    const target = connectedTarget;
+    // Re-applying keeps the route; first enable pins what the remote runs now.
+    const matchedId = remoteQuery.data?.matchedProviderId;
+    const providerId = gatewayEnabled
+      ? gatewayProviderId
+      : matchedId &&
+          providers[matchedId] &&
+          !isLocalLoginProvider(providers[matchedId])
+        ? matchedId
+        : null;
+    runExclusive("gateway", () =>
+      enableGatewayMutation.mutate({ target, providerId, remotePort }),
+    );
+  };
+
+  const startGatewayRoute = (providerId: string | null) => {
+    if (!connectedTarget || providerId === gatewayProviderId) return;
+    const target = connectedTarget;
+    runExclusive("gateway", () =>
+      gatewayRouteMutation.mutate({ target, providerId }),
+    );
+  };
+
+  const requestDisableGateway = () => {
+    const candidates = [gatewayProviderId, currentProviderId]
+      .map((id) => (id ? providers[id] : undefined))
+      .filter((provider): provider is Provider => Boolean(provider));
+    const provider =
+      candidates.find((item) => !isLocalLoginProvider(item)) ?? candidates[0];
+    if (!provider) {
+      toast.error(
+        t("remote.gateway.noDirectProvider", {
+          defaultValue: "没有可写入远端的供应商，请先在本地添加一个。",
+        }),
+      );
+      return;
+    }
+    setConfirmDisableGateway(provider);
+  };
+
+  const startDisableGateway = (provider: Provider) => {
+    if (!connectedTarget) return;
+    const target = connectedTarget;
+    runExclusive("gateway", () =>
+      disableGatewayMutation.mutate({ target, provider }),
+    );
+  };
+
+  const startReconnectGateway = () => {
+    if (!connectedTarget) return;
+    const target = connectedTarget;
+    runExclusive("gateway", () => reconnectGatewayMutation.mutate(target));
+  };
+
   const isSelectedHostConnected =
     Boolean(selectedTarget) &&
     areTargetsEqual(selectedTarget, connectedTarget) &&
@@ -500,6 +726,113 @@ export function RemoteProviderPage({
       </Button>
     </div>
   );
+
+  const renderGatewayRow = ({
+    key,
+    routeId,
+    title,
+    summary,
+    icon,
+    badges,
+    blockedReason,
+  }: {
+    key: string;
+    routeId: string | null;
+    title: string;
+    summary?: string;
+    icon: ReactNode;
+    badges?: ReactNode;
+    blockedReason?: string;
+  }) => {
+    const isActive = routeId === gatewayProviderId;
+    const isSwitching =
+      gatewayRouteMutation.isPending &&
+      gatewayRouteMutation.variables?.providerId === routeId;
+    return (
+      <div
+        key={key}
+        className={cn(
+          "rounded-lg border border-border p-3 transition-colors",
+          isActive && "border-sky-500/60 bg-sky-500/10",
+        )}
+      >
+        <div className="flex items-center gap-3">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border bg-muted">
+            {icon}
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 className="truncate text-sm font-medium">{title}</h3>
+              {badges}
+            </div>
+            {(blockedReason || summary) && (
+              <p className="mt-1 truncate text-xs text-muted-foreground">
+                {blockedReason || summary}
+              </p>
+            )}
+          </div>
+          <Button
+            size="sm"
+            variant={isActive ? "secondary" : "default"}
+            disabled={isActive || Boolean(blockedReason) || gatewayBusy}
+            onClick={() => startGatewayRoute(routeId)}
+          >
+            {isSwitching ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+            {isActive
+              ? t("remote.gateway.inUse", { defaultValue: "使用中" })
+              : t("remote.gateway.use", { defaultValue: "使用" })}
+          </Button>
+        </div>
+      </div>
+    );
+  };
+
+  const renderGatewayProviderList = () => {
+    const localCurrent = providers[currentProviderId];
+    return (
+      <>
+        {renderGatewayRow({
+          key: "__follow_local__",
+          routeId: null,
+          title: t("remote.gateway.followLocal", {
+            defaultValue: "跟随本地",
+          }),
+          summary: t("remote.gateway.followLocalHint", {
+            defaultValue: "使用本机当前供应商（{{name}}），本机切换时一起切换",
+            name: localCurrent?.name ?? "-",
+          }),
+          icon: <RefreshCw className="h-4 w-4 text-muted-foreground" />,
+        })}
+        {localProviders.map((provider) =>
+          renderGatewayRow({
+            key: provider.id,
+            routeId: provider.id,
+            title: provider.name,
+            summary: getProviderSummary(provider, appId),
+            icon: (
+              <ProviderIcon
+                icon={provider.icon}
+                name={provider.name}
+                color={provider.iconColor}
+                size={20}
+              />
+            ),
+            badges:
+              provider.id === currentProviderId ? (
+                <Badge variant="outline" className="rounded-md">
+                  {t("remote.localCurrent", { defaultValue: "本地使用中" })}
+                </Badge>
+              ) : undefined,
+            blockedReason: isLocalLoginProvider(provider)
+              ? t("remote.gateway.localLoginOnly", {
+                  defaultValue: "依赖本机官方登录，不能给远端使用",
+                })
+              : undefined,
+          }),
+        )}
+      </>
+    );
+  };
 
   if (!isSupported) {
     return (
@@ -712,6 +1045,21 @@ export function RemoteProviderPage({
       )}
 
       {remoteQuery.data && (
+        <RemoteGatewayCard
+          appName={t(`apps.${appId}`)}
+          hostLabel={connectedHost}
+          state={gatewayQuery.data}
+          passwordTarget={isPasswordTarget}
+          enabling={enableGatewayMutation.isPending}
+          disabling={disableGatewayMutation.isPending}
+          reconnecting={reconnectGatewayMutation.isPending}
+          onEnable={startEnableGateway}
+          onDisable={requestDisableGateway}
+          onReconnect={startReconnectGateway}
+        />
+      )}
+
+      {remoteQuery.data && (
         <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(22rem,0.9fr)]">
           <section className="rounded-lg border border-border bg-card p-4">
             <div className="flex flex-wrap items-start justify-between gap-3">
@@ -725,7 +1073,17 @@ export function RemoteProviderPage({
                   {connectedHost} / {t(`apps.${appId}`)}
                 </p>
               </div>
-              {matchedProvider ? (
+              {remoteQuery.data.viaGateway ? (
+                <Badge
+                  variant="secondary"
+                  className="gap-1 bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300"
+                >
+                  <Network className="h-3.5 w-3.5" />
+                  {t("remote.gateway.viaGateway", {
+                    defaultValue: "经本机网关",
+                  })}
+                </Badge>
+              ) : matchedProvider ? (
                 <Badge
                   variant="secondary"
                   className="gap-1 bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
@@ -849,9 +1207,14 @@ export function RemoteProviderPage({
                   })}
                 </h2>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  {t("remote.localProvidersHint", {
-                    defaultValue: "选择一个本地供应商写入当前 SSH 服务器。",
-                  })}
+                  {gatewayEnabled
+                    ? t("remote.gateway.providersHint", {
+                        defaultValue:
+                          "经本机网关转发，切换即时生效，无需重启远端进程。",
+                      })
+                    : t("remote.localProvidersHint", {
+                        defaultValue: "选择一个本地供应商写入当前 SSH 服务器。",
+                      })}
                 </p>
               </div>
               <Button
@@ -881,6 +1244,8 @@ export function RemoteProviderPage({
                 <div className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
                   {t("provider.noProviders")}
                 </div>
+              ) : gatewayEnabled ? (
+                renderGatewayProviderList()
               ) : (
                 localProviders.map((provider) => {
                   const isRemoteCurrent =
@@ -993,6 +1358,32 @@ export function RemoteProviderPage({
             startApply(confirmApplyProvider, true);
           }}
           onCancel={() => setConfirmApplyProvider(null)}
+        />
+      )}
+
+      {confirmDisableGateway && (
+        <ConfirmDialog
+          isOpen={Boolean(confirmDisableGateway)}
+          title={t("remote.gateway.confirmDisableTitle", {
+            defaultValue: "改回直连？",
+          })}
+          message={t("remote.gateway.confirmDisableMessage", {
+            defaultValue:
+              "会把「{{provider}}」直接写入 {{host}} 的 {{app}} 配置并断开隧道（其他应用仍在使用时保留隧道）。之后可在下方列表换成其他供应商。",
+            provider: confirmDisableGateway.name,
+            host: connectedHost,
+            app: t(`apps.${appId}`),
+          })}
+          confirmText={t("remote.gateway.confirmDisable", {
+            defaultValue: "改回直连",
+          })}
+          cancelText={t("common.cancel")}
+          onConfirm={() => {
+            const provider = confirmDisableGateway;
+            setConfirmDisableGateway(null);
+            startDisableGateway(provider);
+          }}
+          onCancel={() => setConfirmDisableGateway(null)}
         />
       )}
 

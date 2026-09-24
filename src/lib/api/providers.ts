@@ -73,6 +73,26 @@ export interface RemoteProviderState {
   hasUnmanagedConfig: boolean;
   overwriteWarning?: string | null;
   warnings: string[];
+  viaGateway?: boolean;
+}
+
+export type RemoteTunnelState = "idle" | "connecting" | "connected" | "error";
+
+export interface RemoteGatewayState {
+  hostKey: string;
+  app: AppId;
+  enabled: boolean;
+  /** null follows the local current provider */
+  providerId?: string | null;
+  remotePort?: number | null;
+  tunnel: { state: RemoteTunnelState; message?: string | null };
+  proxyRunning: boolean;
+}
+
+export interface RemoteGatewayApplyResult {
+  state: RemoteGatewayState;
+  remoteState?: RemoteProviderState | null;
+  writtenFiles: string[];
 }
 
 export interface RemoteImportResult {
@@ -199,6 +219,54 @@ export const providersApi = {
       app: appId,
       target,
     });
+  },
+
+  async getRemoteGatewayState(
+    appId: AppId,
+    target: SshConnectionTarget,
+  ): Promise<RemoteGatewayState> {
+    return await invoke("get_remote_gateway_state", { app: appId, target });
+  },
+
+  async enableRemoteGateway(
+    appId: AppId,
+    target: SshConnectionTarget,
+    providerId: string | null,
+    remotePort?: number,
+  ): Promise<RemoteGatewayApplyResult> {
+    return await invoke("enable_remote_gateway", {
+      app: appId,
+      target,
+      providerId,
+      remotePort,
+    });
+  },
+
+  async setRemoteGatewayProvider(
+    appId: AppId,
+    target: SshConnectionTarget,
+    providerId: string | null,
+  ): Promise<RemoteGatewayApplyResult> {
+    return await invoke("set_remote_gateway_provider", {
+      app: appId,
+      target,
+      providerId,
+    });
+  },
+
+  async disableRemoteGateway(
+    id: string,
+    appId: AppId,
+    target: SshConnectionTarget,
+  ): Promise<RemoteApplyResult> {
+    return await invoke("disable_remote_gateway", { id, app: appId, target });
+  },
+
+  async reconnectRemoteGateway(
+    appId: AppId,
+    target: SshConnectionTarget,
+  ): Promise<RemoteGatewayState> {
+    return await invoke("reconnect_remote_gateway", { app: appId, target });
   },
 
   async importDefault(appId: AppId): Promise<boolean> {

@@ -4048,6 +4048,14 @@ impl ProxyService {
         self.server.read().await.is_some()
     }
 
+    pub(crate) async fn running_router(&self) -> Option<axum::Router> {
+        self.server
+            .read()
+            .await
+            .as_ref()
+            .map(|server| server.router())
+    }
+
     /// 热更新熔断器配置
     ///
     /// 如果代理服务器正在运行，将新配置应用到所有已创建的熔断器实例

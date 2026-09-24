@@ -7,6 +7,7 @@ mod gemini_auth;
 mod live;
 mod pi;
 mod remote;
+mod remote_gateway;
 mod usage;
 
 use indexmap::IndexMap;
@@ -34,6 +35,7 @@ pub use remote::{
     RemoteApplyResult, RemoteImportResult, RemoteProviderService, RemoteProviderState,
     RemoteRestartResult, SshConnectionTarget, SshHostEntry,
 };
+pub use remote_gateway::{RemoteGatewayApplyResult, RemoteGatewayService, RemoteGatewayState};
 
 pub fn import_pi_providers_from_live(state: &AppState) -> Result<usize, AppError> {
     pi::import_from_live(state)

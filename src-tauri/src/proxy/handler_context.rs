@@ -107,7 +107,7 @@ impl RequestContext {
         let optimizer_config = state.db.get_optimizer_config().unwrap_or_default();
         let copilot_optimizer_config = state.db.get_copilot_optimizer_config().unwrap_or_default();
 
-        let current_provider_id =
+        let mut current_provider_id =
             crate::settings::get_current_provider(&app_type).unwrap_or_default();
 
         // 从请求体提取模型名称
@@ -129,24 +129,53 @@ impl RequestContext {
             session_result.client_provided
         );
 
+        let remote_origin = crate::proxy::remote_gateway::current_origin();
+        let pinned_provider = match &remote_origin {
+            Some(origin) => {
+                crate::proxy::remote_gateway::remember_session_source(
+                    &session_id,
+                    crate::proxy::remote_gateway::data_source_for_host(&origin.host_key),
+                );
+                crate::proxy::remote_gateway::pinned_provider(&state.db, origin, app_type_str)
+                    .map_err(|e| ProxyError::DatabaseError(e.to_string()))?
+            }
+            None => None,
+        };
+
         // 使用共享的 ProviderRouter 选择 Provider（熔断器状态跨请求保持）
         // 注意：只在这里调用一次，结果传递给 forwarder，避免重复消耗 HalfOpen 名额
-        let providers = state
-            .provider_router
-            .select_providers(app_type_str)
-            .await
-            .map_err(|e| match e {
-                crate::error::AppError::AllProvidersCircuitOpen => {
-                    ProxyError::AllProvidersCircuitOpen
-                }
-                crate::error::AppError::NoProvidersConfigured => ProxyError::NoProvidersConfigured,
-                _ => ProxyError::DatabaseError(e.to_string()),
-            })?;
+        let providers = if let Some(pinned) = pinned_provider {
+            // A host pinned to its own provider must not flip the local current one.
+            current_provider_id = pinned.id.clone();
+            vec![pinned]
+        } else {
+            state
+                .provider_router
+                .select_providers(app_type_str)
+                .await
+                .map_err(|e| match e {
+                    crate::error::AppError::AllProvidersCircuitOpen => {
+                        ProxyError::AllProvidersCircuitOpen
+                    }
+                    crate::error::AppError::NoProvidersConfigured => {
+                        ProxyError::NoProvidersConfigured
+                    }
+                    _ => ProxyError::DatabaseError(e.to_string()),
+                })?
+        };
 
         let provider = providers
             .first()
             .cloned()
             .ok_or(ProxyError::NoAvailableProvider)?;
+        if remote_origin.is_some()
+            && !crate::proxy::remote_gateway::provider_usable_remotely(&provider)
+        {
+            return Err(ProxyError::AuthError(format!(
+                "供应商 {} 依赖本机官方登录，不能通过远端网关使用",
+                provider.name
+            )));
+        }
 
         log::debug!(
             "[{}] Provider: {}, model: {}, failover chain: {} providers, session: {}",

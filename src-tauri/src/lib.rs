@@ -1259,6 +1259,8 @@ pub fn run() {
                 // 检查 settings 表中的代理状态，自动恢复代理服务
                 restore_proxy_state_on_startup(&state).await;
 
+                crate::services::RemoteGatewayService::resume_all(&state).await;
+
                 // Periodic backup check (on startup)
                 if let Err(e) = state.db.periodic_backup_if_needed() {
                     log::warn!("Periodic backup failed on startup: {e}");
@@ -1398,6 +1400,11 @@ pub fn run() {
             commands::inspect_remote_provider,
             commands::import_remote_provider,
             commands::restart_remote_app_processes,
+            commands::get_remote_gateway_state,
+            commands::enable_remote_gateway,
+            commands::set_remote_gateway_provider,
+            commands::disable_remote_gateway,
+            commands::reconnect_remote_gateway,
             commands::import_default_config,
             commands::get_claude_desktop_status,
             commands::get_claude_desktop_default_routes,
@@ -1907,6 +1914,8 @@ pub fn run() {
 /// 确保 Claude Code/Codex/Gemini 的配置不会处于损坏状态。
 /// 使用 stop_with_restore_keep_state 保留 settings 表中的代理状态，下次启动时自动恢复。
 pub async fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
+    crate::services::RemoteGatewayService::shutdown_all().await;
+
     if let Some(state) = app_handle.try_state::<store::AppState>() {
         let proxy_service = &state.proxy_service;
 

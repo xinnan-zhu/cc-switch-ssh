@@ -1,0 +1,283 @@
+name: Release (cc-switch-ssh)
+
+# Tags look like v3.20.4-ssh.1: upstream version + fork build number.
+on:
+  push:
+    tags:
+      - 'v*-ssh.*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-fork-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  release:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+          - os: windows-2022
+          - os: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add macOS targets
+        if: runner.os == 'macOS'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Install Linux system deps
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config curl wget file patchelf libssl-dev rpm \
+            libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
+            || sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.0-dev
+          sudo apt-get install -y --no-install-recommends libsoup-3.0-dev \
+            || sudo apt-get install -y --no-install-recommends libsoup2.4-dev
+
+      - name: Setup pnpm
+        env:
+          COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+        run: |
+          corepack enable
+          corepack install
+          pnpm --version
+
+      - name: Get pnpm store directory
+        id: pnpm-store
+        shell: bash
+        run: echo "path=$(pnpm store path --silent)" >> $GITHUB_OUTPUT
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v5
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: ${{ runner.os }}-${{ runner.arch }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-pnpm-store-
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Write release config from tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          if [[ ! "$TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)-ssh\.([0-9]+)$ ]]; then
+            echo "Tag must look like v3.20.4-ssh.1, got: $TAG" >&2
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          # MSI versions must be numeric: major.minor.patch.build
+          MSI_VERSION="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+          cat > src-tauri/tauri.release.conf.json <<EOF
+          {
+            "version": "${VERSION}",
+            "bundle": { "windows": { "wix": { "version": "${MSI_VERSION}" } } }
+          }
+          EOF
+          cat src-tauri/tauri.release.conf.json
+
+      - name: Build Tauri App (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # No Apple Developer ID: ad-hoc sign so Apple Silicon can launch it.
+          APPLE_SIGNING_IDENTITY: '-'
+        run: |
+          pnpm tauri build --target universal-apple-darwin --bundles app \
+            --config src-tauri/tauri.release.conf.json
+
+      - name: Build Tauri App (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: pnpm tauri build --bundles msi --config src-tauri/tauri.release.conf.json
+
+      - name: Build Tauri App (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          pnpm tauri build --bundles appimage,deb,rpm \
+            --config src-tauri/tauri.release.conf.json
+
+      - name: Prepare macOS assets
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          BUNDLE_DIR="src-tauri/target/universal-apple-darwin/release/bundle/macos"
+          APP_PATH=$(find "$BUNDLE_DIR" -maxdepth 1 -name "*.app" -type d | head -1)
+          TAR_GZ=$(find "$BUNDLE_DIR" -maxdepth 1 -name "*.tar.gz" -type f | head -1)
+          test -n "$APP_PATH" && test -n "$TAR_GZ" && test -f "$TAR_GZ.sig"
+
+          mkdir -p release-assets
+          cp "$TAR_GZ" "release-assets/CC-Switch-${TAG}-macOS.tar.gz"
+          cp "$TAR_GZ.sig" "release-assets/CC-Switch-${TAG}-macOS.tar.gz.sig"
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "release-assets/CC-Switch-${TAG}-macOS.zip"
+
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install create-dmg
+          STAGE="$RUNNER_TEMP/dmg-stage"
+          mkdir -p "$STAGE"
+          ditto "$APP_PATH" "$STAGE/CC Switch.app"
+          create-dmg \
+            --volname "CC Switch" \
+            --background "src-tauri/icons/dmg-background.png" \
+            --window-size 660 400 \
+            --window-pos 200 120 \
+            --icon-size 80 \
+            --icon "CC Switch.app" 180 220 \
+            --hide-extension "CC Switch.app" \
+            --app-drop-link 480 220 \
+            --no-internet-enable \
+            "release-assets/CC-Switch-${TAG}-macOS.dmg" \
+            "$STAGE"
+
+      - name: Prepare Windows assets
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          MSI=$(find src-tauri/target/release/bundle/msi -name "*.msi" -type f | head -1)
+          test -n "$MSI" && test -f "$MSI.sig"
+
+          mkdir -p release-assets/CC-Switch-Portable
+          cp "$MSI" "release-assets/CC-Switch-${TAG}-Windows.msi"
+          cp "$MSI.sig" "release-assets/CC-Switch-${TAG}-Windows.msi.sig"
+
+          cp src-tauri/target/release/cc-switch.exe release-assets/CC-Switch-Portable/
+          printf '# CC Switch portable build marker\nportable=true\n' \
+            > release-assets/CC-Switch-Portable/portable.ini
+          (cd release-assets/CC-Switch-Portable && 7z a -tzip "../CC-Switch-${TAG}-Windows-Portable.zip" .)
+          rm -rf release-assets/CC-Switch-Portable
+
+      - name: Prepare Linux assets
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          BUNDLE_DIR="src-tauri/target/release/bundle"
+          APPIMAGE=$(find "$BUNDLE_DIR" -name "*.AppImage" -type f | head -1)
+          test -n "$APPIMAGE" && test -f "$APPIMAGE.sig"
+
+          mkdir -p release-assets
+          cp "$APPIMAGE" "release-assets/CC-Switch-${TAG}-Linux-x86_64.AppImage"
+          cp "$APPIMAGE.sig" "release-assets/CC-Switch-${TAG}-Linux-x86_64.AppImage.sig"
+          DEB=$(find "$BUNDLE_DIR" -name "*.deb" -type f | head -1 || true)
+          [ -n "$DEB" ] && cp "$DEB" "release-assets/CC-Switch-${TAG}-Linux-x86_64.deb"
+          RPM=$(find "$BUNDLE_DIR" -name "*.rpm" -type f | head -1 || true)
+          [ -n "$RPM" ] && cp "$RPM" "release-assets/CC-Switch-${TAG}-Linux-x86_64.rpm"
+          ls -la release-assets
+
+      - name: Upload release artifacts to workflow
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-assets-${{ runner.os }}
+          path: release-assets/*
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-22.04
+    needs: release
+    steps:
+      - name: Download built release artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-assets-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate latest.json
+        shell: bash
+        env:
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          base_url="https://github.com/$REPO/releases/download/$TAG"
+          sig() { cat "release-assets/$1.sig"; }
+          mac="CC-Switch-${TAG}-macOS.tar.gz"
+          win="CC-Switch-${TAG}-Windows.msi"
+          linux="CC-Switch-${TAG}-Linux-x86_64.AppImage"
+          jq -n \
+            --arg version "${TAG#v}" \
+            --arg notes "Release $TAG" \
+            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg mac_url "$base_url/$mac" --arg mac_sig "$(sig "$mac")" \
+            --arg win_url "$base_url/$win" --arg win_sig "$(sig "$win")" \
+            --arg linux_url "$base_url/$linux" --arg linux_sig "$(sig "$linux")" \
+            '{
+              version: $version,
+              notes: $notes,
+              pub_date: $pub_date,
+              platforms: {
+                "darwin-aarch64": { signature: $mac_sig, url: $mac_url },
+                "darwin-x86_64": { signature: $mac_sig, url: $mac_url },
+                "windows-x86_64": { signature: $win_sig, url: $win_url },
+                "linux-x86_64": { signature: $linux_sig, url: $linux_url }
+              }
+            }' > release-assets/latest.json
+          cat release-assets/latest.json
+          ls -la release-assets
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: CC Switch SSH ${{ github.ref_name }}
+          make_latest: true
+          body: |
+            ## CC Switch SSH ${{ github.ref_name }}
+
+            基于上游 CC Switch 的 fork，增加 SSH 远端供应商管理（推送/导入远端配置、重启远端进程）。
+
+            ### 下载
+
+            - **macOS (Universal)**: `CC-Switch-${{ github.ref_name }}-macOS.dmg` 或 `.zip`
+            - **Windows (x86_64)**: `CC-Switch-${{ github.ref_name }}-Windows.msi`（安装版）或 `-Windows-Portable.zip`（绿色版）
+            - **Linux (x86_64)**: `CC-Switch-${{ github.ref_name }}-Linux-x86_64.AppImage` / `.deb` / `.rpm`
+
+            > `.tar.gz`、`.sig` 和 `latest.json` 供应用内自动更新使用，无需手动下载。
+
+            ### 注意
+
+            - 未使用 Apple 开发者证书签名/公证。首次打开如提示“已损坏”，执行：
+              `xattr -cr "/Applications/CC Switch.app"`
+            - Windows 安装包未做代码签名，SmartScreen 提示时选择“仍要运行”。
+            - 自动更新只跟随本仓库的 Release，不会被上游官方版本覆盖。
+          files: release-assets/*

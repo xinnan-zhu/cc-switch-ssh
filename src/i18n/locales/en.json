@@ -2008,7 +2008,7 @@
   "remote": {
     "title": "Remote Config",
     "manage": "Remote SSH Config",
-    "overwriteWarning": "The remote server already has config files. Switching will overwrite them, so sync them locally first if you want to keep them.",
+    "overwriteWarning": "The remote server already has config files. Switching will replace their provider settings, so sync them locally first if you want to keep them.",
     "applySuccess": "Remote server switched to the selected provider",
     "applyFailed": "Remote switch failed: {{error}}",
     "importSuccess": "Remote config synced locally",
@@ -2049,8 +2049,17 @@
     "applied": "Applied",
     "apply": "Switch",
     "confirmOverwriteTitle": "Overwrite remote config?",
-    "confirmOverwriteMessage": "Continuing will write the selected local provider to the remote server. Existing remote files will be backed up first, but the active remote config will be replaced.",
-    "confirmOverwrite": "Confirm switch"
+    "confirmOverwriteMessage": "Continuing will write the selected local provider to the remote server. Existing remote files will be backed up first; provider settings are replaced, while remote MCP servers, project trust and other settings are kept.",
+    "confirmOverwrite": "Confirm switch",
+    "restartProcesses": "Restart processes",
+    "restartProcessesHint": "Stop related processes on the remote so the new config takes effect",
+    "confirmRestartTitle": "Restart remote {{app}} processes?",
+    "confirmRestartMessage": "This stops every {{app}} process of the current user on {{host}}, including ones started by VS Code / Cursor extensions. Running conversations will be interrupted. The IDE window itself is not affected; reopen the conversation to use the new config.",
+    "restartSuccess": "Stopped {{count}} {{app}} process(es)",
+    "restartForced": "{{count}} process(es) did not respond and were force-killed.",
+    "restartHint": "Reopen the conversation or reload the IDE window to use the new config.",
+    "restartNone": "No running {{app}} processes on the remote",
+    "restartFailed": "Failed to restart remote processes: {{error}}"
   },
   "mcp": {
     "title": "MCP Management",

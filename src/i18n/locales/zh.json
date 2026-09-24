@@ -2008,7 +2008,7 @@
   "remote": {
     "title": "远端配置",
     "manage": "远端 SSH 配置",
-    "overwriteWarning": "远端已有配置。切换会覆盖这些文件，建议先同步到本地。",
+    "overwriteWarning": "远端已有配置。切换会替换其中的供应商配置，建议先同步到本地。",
     "applySuccess": "远端已切换到选中的供应商",
     "applyFailed": "远端切换失败: {{error}}",
     "importSuccess": "已同步远端配置到本地",
@@ -2049,8 +2049,17 @@
     "applied": "已应用",
     "apply": "切换",
     "confirmOverwriteTitle": "确认覆盖远端配置？",
-    "confirmOverwriteMessage": "继续后会把选中的本地供应商写入远端。当前远端文件会先自动备份，但远端正在使用的配置会被替换。",
-    "confirmOverwrite": "确认切换"
+    "confirmOverwriteMessage": "继续后会把选中的本地供应商写入远端。当前远端文件会先自动备份；供应商相关配置会被替换，MCP、项目信任等远端设置会保留。",
+    "confirmOverwrite": "确认切换",
+    "restartProcesses": "重启进程",
+    "restartProcessesHint": "结束远端相关进程，让新配置立即生效",
+    "confirmRestartTitle": "重启远端 {{app}} 进程？",
+    "confirmRestartMessage": "会结束 {{host}} 上当前用户的所有 {{app}} 进程（包括 VS Code / Cursor 插件启动的进程），正在进行的对话会被中断。IDE 窗口本身不受影响，重新打开对话即可使用新配置。",
+    "restartSuccess": "已结束 {{count}} 个 {{app}} 进程",
+    "restartForced": "{{count}} 个进程未响应，已强制结束。",
+    "restartHint": "在 IDE 中重新打开对话或重新加载窗口即可使用新配置。",
+    "restartNone": "远端没有正在运行的 {{app}} 进程",
+    "restartFailed": "重启远端进程失败: {{error}}"
   },
   "mcp": {
     "title": "MCP 管理",

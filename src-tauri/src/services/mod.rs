@@ -42,7 +42,8 @@ pub use omo::OmoService;
 pub use prompt::PromptService;
 pub use provider::{
     ProviderService, ProviderSortUpdate, RemoteApplyResult, RemoteImportResult,
-    RemoteProviderService, RemoteProviderState, SshConnectionTarget, SshHostEntry, SwitchResult,
+    RemoteProviderService, RemoteProviderState, RemoteRestartResult, SshConnectionTarget,
+    SshHostEntry, SwitchResult,
 };
 pub use proxy::ProxyService;
 #[allow(unused_imports)]

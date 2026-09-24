@@ -32,7 +32,7 @@ pub use live::{
 };
 pub use remote::{
     RemoteApplyResult, RemoteImportResult, RemoteProviderService, RemoteProviderState,
-    SshConnectionTarget, SshHostEntry,
+    RemoteRestartResult, SshConnectionTarget, SshHostEntry,
 };
 
 pub fn import_pi_providers_from_live(state: &AppState) -> Result<usize, AppError> {
@@ -6410,7 +6410,7 @@ impl ProviderService {
     }
 
     /// Extract common config for Claude (JSON format)
-    fn extract_claude_common_config(settings: &Value) -> Result<String, AppError> {
+    pub(crate) fn extract_claude_common_config(settings: &Value) -> Result<String, AppError> {
         let mut config = settings.clone();
 
         // 供应商专属的**非机密**字段（模型 + 端点），不应共享。凭据/机密不在此列举，

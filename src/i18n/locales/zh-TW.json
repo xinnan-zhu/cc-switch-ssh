@@ -2009,7 +2009,7 @@
   "remote": {
     "title": "遠端設定",
     "manage": "遠端 SSH 設定",
-    "overwriteWarning": "遠端已有設定。切換會覆寫這些檔案，建議先同步到本機。",
+    "overwriteWarning": "遠端已有設定。切換會取代其中的供應商設定，建議先同步到本機。",
     "applySuccess": "遠端已切換到選取的供應商",
     "applyFailed": "遠端切換失敗: {{error}}",
     "importSuccess": "已同步遠端設定到本機",
@@ -2050,8 +2050,17 @@
     "applied": "已套用",
     "apply": "切換",
     "confirmOverwriteTitle": "確認覆寫遠端設定？",
-    "confirmOverwriteMessage": "繼續後會把選取的本機供應商寫入遠端。目前遠端檔案會先自動備份，但遠端正在使用的設定會被取代。",
-    "confirmOverwrite": "確認切換"
+    "confirmOverwriteMessage": "繼續後會把選取的本機供應商寫入遠端。目前遠端檔案會先自動備份；供應商相關設定會被取代，MCP、專案信任等遠端設定會保留。",
+    "confirmOverwrite": "確認切換",
+    "restartProcesses": "重啟程序",
+    "restartProcessesHint": "結束遠端相關程序，讓新設定立即生效",
+    "confirmRestartTitle": "重啟遠端 {{app}} 程序？",
+    "confirmRestartMessage": "會結束 {{host}} 上目前使用者的所有 {{app}} 程序（包含 VS Code / Cursor 擴充功能啟動的程序），進行中的對話會被中斷。IDE 視窗本身不受影響，重新開啟對話即可使用新設定。",
+    "restartSuccess": "已結束 {{count}} 個 {{app}} 程序",
+    "restartForced": "{{count}} 個程序未回應，已強制結束。",
+    "restartHint": "在 IDE 中重新開啟對話或重新載入視窗即可使用新設定。",
+    "restartNone": "遠端沒有正在執行的 {{app}} 程序",
+    "restartFailed": "重啟遠端程序失敗: {{error}}"
   },
   "mcp": {
     "title": "MCP 管理",

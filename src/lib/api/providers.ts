@@ -80,6 +80,18 @@ export interface RemoteImportResult {
   provider: Provider;
 }
 
+export interface RemoteProcessInfo {
+  pid: number;
+  command: string;
+}
+
+export interface RemoteRestartResult {
+  hostAlias: string;
+  app: AppId;
+  stopped: RemoteProcessInfo[];
+  forceKilled: number[];
+}
+
 export interface ClaudeDesktopStatus {
   supported: boolean;
   configured: boolean;
@@ -176,6 +188,16 @@ export const providersApi = {
     target: SshConnectionTarget,
   ): Promise<RemoteImportResult> {
     return await invoke("import_remote_provider", { app: appId, target });
+  },
+
+  async restartRemoteProcesses(
+    appId: AppId,
+    target: SshConnectionTarget,
+  ): Promise<RemoteRestartResult> {
+    return await invoke("restart_remote_app_processes", {
+      app: appId,
+      target,
+    });
   },
 
   async importDefault(appId: AppId): Promise<boolean> {

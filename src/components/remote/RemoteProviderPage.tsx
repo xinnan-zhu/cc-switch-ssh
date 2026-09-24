@@ -6,6 +6,7 @@ import {
   Download,
   Loader2,
   RefreshCw,
+  RotateCcw,
   Server,
   UploadCloud,
 } from "lucide-react";
@@ -163,6 +164,7 @@ export function RemoteProviderPage({
   const [connectionVersion, setConnectionVersion] = useState(0);
   const [confirmApplyProvider, setConfirmApplyProvider] =
     useState<Provider | null>(null);
+  const [confirmRestart, setConfirmRestart] = useState(false);
 
   const hostsQuery = useQuery({
     queryKey: ["sshConfigHosts"],
@@ -270,28 +272,73 @@ export function RemoteProviderPage({
   const overwriteWarning =
     remoteQuery.data?.overwriteWarning ??
     t("remote.overwriteWarning", {
-      defaultValue: "远端已有配置。切换会覆盖这些文件，建议先同步到本地。",
+      defaultValue:
+        "远端已有配置。切换会替换其中的供应商配置，建议先同步到本地。",
     });
+
+  const restartMutation = useMutation({
+    mutationFn: (target: SshConnectionTarget) =>
+      providersApi.restartRemoteProcesses(appId, target),
+    onSuccess: (result) => {
+      setConfirmRestart(false);
+      const count = result.stopped.length;
+      if (count === 0) {
+        toast.info(
+          t("remote.restartNone", {
+            defaultValue: "远端没有正在运行的 {{app}} 进程",
+            app: t(`apps.${appId}`),
+          }),
+        );
+        return;
+      }
+      toast.success(
+        t("remote.restartSuccess", {
+          defaultValue: "已结束 {{count}} 个 {{app}} 进程",
+          count,
+          app: t(`apps.${appId}`),
+        }),
+        {
+          description: [
+            result.forceKilled.length > 0
+              ? t("remote.restartForced", {
+                  defaultValue: "{{count}} 个进程未响应，已强制结束。",
+                  count: result.forceKilled.length,
+                })
+              : "",
+            t("remote.restartHint", {
+              defaultValue:
+                "在 IDE 中重新打开对话或重新加载窗口即可使用新配置。",
+            }),
+          ]
+            .filter(Boolean)
+            .join(" "),
+        },
+      );
+    },
+    onError: (error: unknown) => {
+      setConfirmRestart(false);
+      toast.error(
+        t("remote.restartFailed", {
+          defaultValue: "重启远端进程失败: {{error}}",
+          error: extractErrorMessage(error),
+        }),
+        { duration: 7000 },
+      );
+    },
+  });
 
   const applyMutation = useMutation({
     mutationFn: ({
       provider,
       forceOverwrite,
+      target,
     }: {
       provider: Provider;
       forceOverwrite: boolean;
-    }) => {
-      if (!connectedTarget) {
-        throw new Error("SSH target is not connected");
-      }
-      return providersApi.applyToRemote(
-        provider.id,
-        appId,
-        connectedTarget,
-        forceOverwrite,
-      );
-    },
-    onSuccess: async (result) => {
+      target: SshConnectionTarget;
+    }) =>
+      providersApi.applyToRemote(provider.id, appId, target, forceOverwrite),
+    onSuccess: async (result, { target }) => {
       setConfirmApplyProvider(null);
       toast.success(
         t("remote.applySuccess", {
@@ -301,6 +348,13 @@ export function RemoteProviderPage({
           description: `${result.hostAlias} - ${
             result.writtenFiles?.length ?? 0
           } files`,
+          duration: 10000,
+          action: {
+            label: t("remote.restartProcesses", {
+              defaultValue: "重启进程",
+            }),
+            onClick: () => restartMutation.mutate(target),
+          },
         },
       );
       await queryClient.invalidateQueries({
@@ -322,14 +376,18 @@ export function RemoteProviderPage({
     provider: Provider,
     isRemoteCurrent: boolean,
   ) => {
-    if (isRemoteCurrent || applyMutation.isPending) return;
+    if (isRemoteCurrent || applyMutation.isPending || !connectedTarget) return;
 
     if (hasUnmanagedRemoteConfig) {
       setConfirmApplyProvider(provider);
       return;
     }
 
-    applyMutation.mutate({ provider, forceOverwrite: false });
+    applyMutation.mutate({
+      provider,
+      forceOverwrite: false,
+      target: connectedTarget,
+    });
   };
 
   const importMutation = useMutation({
@@ -771,6 +829,22 @@ export function RemoteProviderPage({
                   })}
                 </p>
               </div>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setConfirmRestart(true)}
+                disabled={!connectedTarget || restartMutation.isPending}
+                title={t("remote.restartProcessesHint", {
+                  defaultValue: "结束远端相关进程，让新配置立即生效",
+                })}
+              >
+                {restartMutation.isPending ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <RotateCcw className="h-4 w-4" />
+                )}
+                {t("remote.restartProcesses", { defaultValue: "重启进程" })}
+              </Button>
             </div>
 
             <div className="mt-4 space-y-2">
@@ -878,22 +952,48 @@ export function RemoteProviderPage({
             "remote.confirmOverwriteMessage",
             {
               defaultValue:
-                "继续后会把选中的本地供应商写入远端。当前远端文件会先自动备份，但远端正在使用的配置会被替换。",
+                "继续后会把选中的本地供应商写入远端。当前远端文件会先自动备份；供应商相关配置会被替换，MCP、项目信任等远端设置会保留。",
             },
           )}`}
           confirmText={t("remote.confirmOverwrite", {
             defaultValue: "确认切换",
           })}
           cancelText={t("common.cancel")}
-          onConfirm={() =>
+          onConfirm={() => {
+            if (!connectedTarget) return;
             applyMutation.mutate({
               provider: confirmApplyProvider,
               forceOverwrite: true,
-            })
-          }
+              target: connectedTarget,
+            });
+          }}
           onCancel={() => setConfirmApplyProvider(null)}
         />
       )}
+
+      <ConfirmDialog
+        isOpen={confirmRestart}
+        title={t("remote.confirmRestartTitle", {
+          defaultValue: "重启远端 {{app}} 进程？",
+          app: t(`apps.${appId}`),
+        })}
+        message={t("remote.confirmRestartMessage", {
+          defaultValue:
+            "会结束 {{host}} 上当前用户的所有 {{app}} 进程（包括 VS Code / Cursor 插件启动的进程），正在进行的对话会被中断。IDE 窗口本身不受影响，重新打开对话即可使用新配置。",
+          host: connectedHost,
+          app: t(`apps.${appId}`),
+        })}
+        confirmText={t("remote.restartProcesses", {
+          defaultValue: "重启进程",
+        })}
+        cancelText={t("common.cancel")}
+        variant="destructive"
+        pending={restartMutation.isPending}
+        onConfirm={() => {
+          if (connectedTarget) restartMutation.mutate(connectedTarget);
+        }}
+        onCancel={() => setConfirmRestart(false)}
+      />
     </div>
   );
 }

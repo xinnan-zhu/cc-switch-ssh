@@ -10,7 +10,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::windows::process::CommandExt;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use toml_edit::DocumentMut;
 
 use crate::app_config::AppType;
@@ -114,6 +114,22 @@ pub struct RemoteImportResult {
     pub host_alias: String,
     pub app: String,
     pub provider: Provider,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteProcessInfo {
+    pub pid: u32,
+    pub command: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteRestartResult {
+    pub host_alias: String,
+    pub app: String,
+    pub stopped: Vec<RemoteProcessInfo>,
+    pub force_killed: Vec<u32>,
 }
 
 /// Contents of the remote live config files for one app; `None` means missing.
@@ -337,11 +353,109 @@ impl RemoteProviderService {
             provider,
         })
     }
+
+    /// Stops every process of the SSH user that belongs to the app (CLI and
+    /// IDE-extension binaries), so the next launch picks up the new config.
+    pub fn restart_remote_app_processes(
+        app_type: AppType,
+        target: &SshConnectionTarget,
+    ) -> Result<RemoteRestartResult, AppError> {
+        ensure_remote_supported(&app_type)?;
+        let target = resolve_ssh_target(target)?;
+
+        let command = format!("sh -s -- {}", app_type.as_str());
+        let output = run_ssh_command(
+            &target,
+            &command,
+            Some(REMOTE_STOP_APP_PROCESSES_SCRIPT.as_bytes()),
+        )?;
+        let (stopped, force_killed) = parse_stop_processes_output(&output);
+
+        Ok(RemoteRestartResult {
+            host_alias: target.label().to_string(),
+            app: app_type.as_str().to_string(),
+            stopped,
+            force_killed,
+        })
+    }
+}
+
+/// Run as `sh -s -- <app>`. Matches on the executable name (plus node/bun
+/// wrappers of the npm packages) so the pipeline's own awk/sh never match, and
+/// skips IDE server/extension-host processes so the editor survives.
+const REMOTE_STOP_APP_PROCESSES_SCRIPT: &str = r#"app="$1"
+self=$$
+targets=$(ps -u "$(id -u)" -o pid= -o comm= -o args= 2>/dev/null | awk -v self="$self" -v app="$app" '
+{
+  pid = $1
+  n = split($2, parts, "/")
+  comm = parts[n]
+  if (pid == self) next
+  args = $0
+  sub(/^[ \t]*[0-9]+[ \t]+[^ \t]+[ \t]*/, "", args)
+  if (args ~ /(extensionHost|bootstrap-fork|server-main\.js)/) next
+  wrapper = (comm ~ /^(node|bun)$/)
+  hit = 0
+  if (app == "codex") {
+    hit = (comm ~ /^codex/) || (wrapper && args ~ /(@openai\/codex|\/codex( |$))/)
+  } else if (app == "claude") {
+    hit = (comm == "claude") || (wrapper && args ~ /(@anthropic-ai\/claude-code|claude-code\/cli|\/claude( |$))/)
+  } else if (app == "gemini") {
+    hit = (comm == "gemini") || (wrapper && args ~ /(gemini-cli|\/gemini( |$))/)
+  }
+  if (hit) printf "%s\t%s\n", pid, args
+}')
+[ -z "$targets" ] && exit 0
+printf '%s\n' "$targets"
+pids=$(printf '%s\n' "$targets" | cut -f1)
+kill -TERM $pids 2>/dev/null || true
+alive=""
+i=0
+while [ "$i" -lt 5 ]; do
+  sleep 1
+  alive=""
+  for p in $pids; do
+    kill -0 "$p" 2>/dev/null && alive="$alive $p"
+  done
+  [ -z "$alive" ] && break
+  i=$((i + 1))
+done
+if [ -n "$alive" ]; then
+  kill -KILL $alive 2>/dev/null || true
+  printf '__CC_SWITCH_FORCE_KILLED__%s\n' "$alive"
+fi
+"#;
+
+fn parse_stop_processes_output(output: &str) -> (Vec<RemoteProcessInfo>, Vec<u32>) {
+    const FORCE_MARKER: &str = "__CC_SWITCH_FORCE_KILLED__";
+    let mut stopped = Vec::new();
+    let mut force_killed = Vec::new();
+
+    for line in output.lines() {
+        if let Some(rest) = line.strip_prefix(FORCE_MARKER) {
+            force_killed.extend(
+                rest.split_whitespace()
+                    .filter_map(|pid| pid.parse::<u32>().ok()),
+            );
+            continue;
+        }
+        let Some((pid, command)) = line.split_once('\t') else {
+            continue;
+        };
+        if let Ok(pid) = pid.trim().parse() {
+            stopped.push(RemoteProcessInfo {
+                pid,
+                command: command.trim().to_string(),
+            });
+        }
+    }
+
+    (stopped, force_killed)
 }
 
 fn remote_overwrite_warning(app_type: &AppType, host_alias: &str) -> String {
     format!(
-        "远端 {host_alias} 已有 {} 配置。切换会覆盖这些文件，建议先同步到本地；覆盖前会自动备份到远端 ~/.cc-switch/remote-backups。",
+        "远端 {host_alias} 已有未同步的 {} 配置。切换会替换其中的供应商配置（MCP、项目信任等远端设置会保留），建议先同步到本地；写入前会自动备份到远端 ~/.cc-switch/remote-backups。",
         app_type.as_str()
     )
 }
@@ -612,7 +726,10 @@ fn build_remote_writes(
 
     match app_type {
         AppType::Claude => {
-            let settings = sanitize_claude_settings_for_live(&effective_settings);
+            let settings = merge_remote_claude_settings(
+                &sanitize_claude_settings_for_live(&effective_settings),
+                snapshot.get(CLAUDE_SETTINGS_PATH),
+            )?;
             Ok(vec![RemoteWrite {
                 path: CLAUDE_SETTINGS_PATH,
                 backup_name: "claude-settings.json",
@@ -671,14 +788,119 @@ fn build_remote_codex_writes(
         let anchor = snapshot
             .get(CODEX_CONFIG_PATH)
             .filter(|text| !text.trim().is_empty());
+        let config_text = anchor_codex_model_provider_id(&config_text, anchor)?;
         writes.push(RemoteWrite {
             path: CODEX_CONFIG_PATH,
             backup_name: "codex-config.toml",
-            content: Some(anchor_codex_model_provider_id(&config_text, anchor)?),
+            content: Some(preserve_remote_codex_tables(&config_text, anchor)?),
         });
     }
 
     Ok(writes)
+}
+
+/// Tables that belong to the remote host rather than to the provider: its MCP
+/// servers (provider snapshots are stored without them) and the project trust
+/// and notice state Codex records itself.
+const REMOTE_OWNED_CODEX_TABLES: &[&str] = &["mcp_servers", "projects", "notice"];
+
+fn preserve_remote_codex_tables(
+    config_text: &str,
+    remote_config_text: Option<&str>,
+) -> Result<String, AppError> {
+    let Some(remote_doc) = remote_config_text.and_then(|text| text.parse::<DocumentMut>().ok())
+    else {
+        return Ok(config_text.to_string());
+    };
+    if !REMOTE_OWNED_CODEX_TABLES
+        .iter()
+        .any(|key| remote_doc.contains_key(key))
+    {
+        return Ok(config_text.to_string());
+    }
+
+    let mut doc = config_text
+        .parse::<DocumentMut>()
+        .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
+    for key in REMOTE_OWNED_CODEX_TABLES {
+        if let Some(item) = remote_doc.get(key) {
+            doc.insert(key, item.clone());
+        }
+    }
+    Ok(doc.to_string())
+}
+
+/// Replaces only the provider-owned part of the remote settings.json (endpoint,
+/// credentials, model mapping) and keeps the host's other settings. Local
+/// common-config keys fill in only what the remote doesn't set itself.
+fn merge_remote_claude_settings(
+    provider_settings: &Value,
+    remote_settings_text: Option<&str>,
+) -> Result<Value, AppError> {
+    let Some(remote) = remote_settings_text
+        .and_then(|text| serde_json::from_str::<Value>(text).ok())
+        .filter(Value::is_object)
+    else {
+        return Ok(provider_settings.clone());
+    };
+
+    let common_of = |settings: &Value| -> Result<Map<String, Value>, AppError> {
+        let text = super::ProviderService::extract_claude_common_config(settings)?;
+        Ok(serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default())
+    };
+    let local_common = common_of(provider_settings)?;
+    let remote_common = common_of(&remote)?;
+
+    let mut merged = local_common.clone();
+    overlay_claude_settings(&mut merged, &remote_common, |_, _| true);
+    if let Some(provider_obj) = provider_settings.as_object() {
+        let local_common_env = local_common.get("env").and_then(Value::as_object);
+        overlay_claude_settings(&mut merged, provider_obj, |key, env_key| match env_key {
+            Some(env_key) => !local_common_env.is_some_and(|env| env.contains_key(env_key)),
+            None => !local_common.contains_key(key),
+        });
+    }
+
+    Ok(Value::Object(merged))
+}
+
+/// Copies `source` into `target`, merging `env` per variable. `include` gets the
+/// top-level key and, inside `env`, the variable name.
+fn overlay_claude_settings(
+    target: &mut Map<String, Value>,
+    source: &Map<String, Value>,
+    include: impl Fn(&str, Option<&str>) -> bool,
+) {
+    for (key, value) in source {
+        if key == "env" {
+            let Some(source_env) = value.as_object() else {
+                continue;
+            };
+            let entries: Vec<_> = source_env
+                .iter()
+                .filter(|(env_key, _)| include(key, Some(env_key)))
+                .collect();
+            if entries.is_empty() {
+                continue;
+            }
+            let target_env = target
+                .entry("env")
+                .or_insert_with(|| Value::Object(Map::new()));
+            if !target_env.is_object() {
+                *target_env = Value::Object(Map::new());
+            }
+            if let Some(target_env) = target_env.as_object_mut() {
+                for (env_key, env_value) in entries {
+                    target_env.insert(env_key.clone(), env_value.clone());
+                }
+            }
+        } else if include(key, None) {
+            target.insert(key.clone(), value.clone());
+        }
+    }
 }
 
 fn active_codex_model_provider_id(doc: &DocumentMut) -> Option<String> {
@@ -1532,5 +1754,120 @@ model_provider = "packy"
             content: Some("model = \"gpt-5.4\"\n".to_string()),
         }];
         assert!(!remote_writes_match_snapshot(&mismatched, &snapshot));
+    }
+
+    #[test]
+    fn preserve_remote_codex_tables_keeps_remote_mcp_and_trust() -> Result<(), AppError> {
+        let config = r#"model_provider = "packy"
+model = "gpt-5.5"
+
+[model_providers.packy]
+base_url = "https://example.com/v1"
+
+[mcp_servers.local_only]
+command = "local"
+"#;
+        let remote = r#"model = "gpt-5.4"
+
+[mcp_servers.remote_tool]
+command = "remote"
+
+[projects."/srv/app"]
+trust_level = "trusted"
+"#;
+
+        let merged = preserve_remote_codex_tables(config, Some(remote))?;
+        let doc = merged.parse::<DocumentMut>().unwrap();
+
+        assert_eq!(doc["model"].as_str(), Some("gpt-5.5"));
+        assert_eq!(
+            doc["model_providers"]["packy"]["base_url"].as_str(),
+            Some("https://example.com/v1")
+        );
+        assert_eq!(
+            doc["mcp_servers"]["remote_tool"]["command"].as_str(),
+            Some("remote")
+        );
+        assert!(doc["mcp_servers"].get("local_only").is_none());
+        assert_eq!(
+            doc["projects"]["/srv/app"]["trust_level"].as_str(),
+            Some("trusted")
+        );
+
+        assert_eq!(preserve_remote_codex_tables(config, None)?, config);
+        Ok(())
+    }
+
+    #[test]
+    fn merge_remote_claude_settings_replaces_only_provider_keys() -> Result<(), AppError> {
+        let provider = json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://new.example.com",
+                "ANTHROPIC_AUTH_TOKEN": "new-token",
+                "ANTHROPIC_MODEL": "new-model",
+                "SHARED_FLAG": "local"
+            },
+            "includeCoAuthoredBy": false
+        });
+        let remote = json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://old.example.com",
+                "ANTHROPIC_API_KEY": "old-key",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "old-opus",
+                "SHARED_FLAG": "remote",
+                "HTTPS_PROXY": "http://proxy:3128"
+            },
+            "permissions": { "allow": ["Bash(ls)"] },
+            "hooks": { "Stop": [] }
+        })
+        .to_string();
+
+        let merged = merge_remote_claude_settings(&provider, Some(&remote))?;
+
+        assert_eq!(
+            merged,
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://new.example.com",
+                    "ANTHROPIC_AUTH_TOKEN": "new-token",
+                    "ANTHROPIC_MODEL": "new-model",
+                    "SHARED_FLAG": "remote",
+                    "HTTPS_PROXY": "http://proxy:3128"
+                },
+                "includeCoAuthoredBy": false,
+                "permissions": { "allow": ["Bash(ls)"] },
+                "hooks": { "Stop": [] }
+            })
+        );
+
+        assert_eq!(merge_remote_claude_settings(&provider, None)?, provider);
+        assert_eq!(
+            merge_remote_claude_settings(&provider, Some("not json"))?,
+            provider
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_stop_processes_output_collects_stopped_and_forced() {
+        let output = "123\tcodex app-server\n456\tnode /usr/lib/node_modules/@openai/codex/bin/codex.js\n__CC_SWITCH_FORCE_KILLED__ 456\n";
+
+        let (stopped, forced) = parse_stop_processes_output(output);
+
+        assert_eq!(
+            stopped,
+            vec![
+                RemoteProcessInfo {
+                    pid: 123,
+                    command: "codex app-server".to_string(),
+                },
+                RemoteProcessInfo {
+                    pid: 456,
+                    command: "node /usr/lib/node_modules/@openai/codex/bin/codex.js".to_string(),
+                },
+            ]
+        );
+        assert_eq!(forced, vec![456]);
+        assert_eq!(parse_stop_processes_output(""), (Vec::new(), Vec::new()));
     }
 }

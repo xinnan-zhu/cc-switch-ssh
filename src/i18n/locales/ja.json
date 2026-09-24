@@ -2008,7 +2008,7 @@
   "remote": {
     "title": "リモート設定",
     "manage": "リモート SSH 設定",
-    "overwriteWarning": "リモートには既存の設定があります。切り替えるとこれらのファイルが上書きされるため、保持したい場合は先にローカルへ同期してください。",
+    "overwriteWarning": "リモートには既存の設定があります。切り替えるとプロバイダー設定が置き換えられるため、保持したい場合は先にローカルへ同期してください。",
     "applySuccess": "リモートを選択したプロバイダーに切り替えました",
     "applyFailed": "リモート切り替えに失敗しました: {{error}}",
     "importSuccess": "リモート設定をローカルへ同期しました",
@@ -2049,8 +2049,17 @@
     "applied": "適用済み",
     "apply": "切り替え",
     "confirmOverwriteTitle": "リモート設定を上書きしますか？",
-    "confirmOverwriteMessage": "続行すると、選択したローカルプロバイダーをリモートへ書き込みます。既存のリモートファイルは先にバックアップされますが、現在使用中のリモート設定は置き換えられます。",
-    "confirmOverwrite": "切り替えを確認"
+    "confirmOverwriteMessage": "続行すると、選択したローカルプロバイダーをリモートへ書き込みます。既存のリモートファイルは先にバックアップされます。プロバイダー設定は置き換えられますが、MCP やプロジェクトの信頼設定などリモート側の設定は保持されます。",
+    "confirmOverwrite": "切り替えを確認",
+    "restartProcesses": "プロセスを再起動",
+    "restartProcessesHint": "リモートの関連プロセスを終了し、新しい設定をすぐに反映します",
+    "confirmRestartTitle": "リモートの {{app}} プロセスを再起動しますか？",
+    "confirmRestartMessage": "{{host}} 上の現在のユーザーの {{app}} プロセス（VS Code / Cursor 拡張機能が起動したものを含む）をすべて終了します。進行中の会話は中断されます。IDE ウィンドウ自体には影響せず、会話を開き直すと新しい設定が使われます。",
+    "restartSuccess": "{{app}} プロセスを {{count}} 個終了しました",
+    "restartForced": "{{count}} 個のプロセスが応答しなかったため強制終了しました。",
+    "restartHint": "IDE で会話を開き直すか、ウィンドウを再読み込みすると新しい設定が使われます。",
+    "restartNone": "リモートで実行中の {{app}} プロセスはありません",
+    "restartFailed": "リモートプロセスの再起動に失敗しました: {{error}}"
   },
   "mcp": {
     "title": "MCP 管理",

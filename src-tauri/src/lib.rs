@@ -1397,6 +1397,7 @@ pub fn run() {
             commands::apply_provider_to_remote,
             commands::inspect_remote_provider,
             commands::import_remote_provider,
+            commands::restart_remote_app_processes,
             commands::import_default_config,
             commands::get_claude_desktop_status,
             commands::get_claude_desktop_default_routes,

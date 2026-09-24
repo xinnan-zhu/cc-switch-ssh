@@ -8,8 +8,8 @@ use crate::error::AppError;
 use crate::provider::{ClaudeDesktopMode, Provider};
 use crate::services::{
     EndpointLatency, ProviderService, ProviderSortUpdate, RemoteApplyResult, RemoteImportResult,
-    RemoteProviderService, RemoteProviderState, SpeedtestService, SshConnectionTarget,
-    SshHostEntry, SwitchResult,
+    RemoteProviderService, RemoteProviderState, RemoteRestartResult, SpeedtestService,
+    SshConnectionTarget, SshHostEntry, SwitchResult,
 };
 use crate::store::AppState;
 use std::str::FromStr;
@@ -202,6 +202,20 @@ pub async fn import_remote_provider(
     })
     .await
     .map_err(|e| format!("下载远端配置失败: {e}"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn restart_remote_app_processes(
+    app: String,
+    target: SshConnectionTarget,
+) -> Result<RemoteRestartResult, String> {
+    let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        RemoteProviderService::restart_remote_app_processes(app_type, &target)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("重启远端进程失败: {e}"))?
 }
 
 fn import_default_config_internal(state: &AppState, app_type: AppType) -> Result<bool, AppError> {

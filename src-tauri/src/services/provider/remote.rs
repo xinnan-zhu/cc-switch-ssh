@@ -173,9 +173,13 @@ pub(super) struct RemoteWrite {
     pub(super) content: Option<String>,
 }
 
+#[derive(Default)]
 struct RemoteSettingsRead {
     settings_config: Option<Value>,
     warnings: Vec<String>,
+    /// Remote files that exist but couldn't be parsed; their content is left
+    /// out of `settings_config`.
+    invalid_files: Vec<String>,
 }
 
 pub struct RemoteProviderService;
@@ -277,6 +281,12 @@ impl RemoteProviderService {
 
         let snapshot = read_remote_snapshot(&app_type, &target)?;
         let read = remote_settings_from_snapshot(&app_type, &snapshot)?;
+        if !read.invalid_files.is_empty() {
+            return Err(AppError::Message(format!(
+                "远端 {} 格式损坏，无法同步到本地；请先在服务器上修复该文件",
+                read.invalid_files.join("、")
+            )));
+        }
         let settings_config = read.settings_config.ok_or_else(|| {
             AppError::Message(format!(
                 "远端 {host_alias} 没有可导入的 {} 配置",
@@ -637,9 +647,102 @@ fn find_matching_local_provider(
         return Ok(None);
     }
 
-    Ok(providers.iter().find_map(|(id, provider)| {
-        let writes = build_remote_writes(state, app_type, provider, snapshot).ok()?;
-        remote_writes_match_snapshot(&writes, snapshot).then(|| id.clone())
+    let candidates: Vec<(&String, Vec<RemoteWrite>)> = providers
+        .iter()
+        .filter_map(|(id, provider)| {
+            Some((
+                id,
+                build_remote_writes(state, app_type, provider, snapshot).ok()?,
+            ))
+        })
+        .collect();
+    if let Some((id, _)) = candidates
+        .iter()
+        .find(|(_, writes)| remote_writes_match_snapshot(writes, snapshot))
+    {
+        return Ok(Some((*id).clone()));
+    }
+
+    // Codex rewrites its own config.toml (model picked in /model, desktop and
+    // plugin state), so fall back to comparing only the endpoint in use.
+    if matches!(app_type, AppType::Codex) {
+        let remote = codex_endpoint_identity(
+            snapshot.get(CODEX_CONFIG_PATH),
+            snapshot.get(CODEX_AUTH_PATH),
+        );
+        if remote.is_some() {
+            return Ok(candidates.iter().find_map(|(id, writes)| {
+                let written = |path: &str| {
+                    writes
+                        .iter()
+                        .find(|write| write.path == path)
+                        .map(|write| write.content.as_deref())
+                };
+                let config =
+                    written(CODEX_CONFIG_PATH).unwrap_or_else(|| snapshot.get(CODEX_CONFIG_PATH));
+                let auth =
+                    written(CODEX_AUTH_PATH).unwrap_or_else(|| snapshot.get(CODEX_AUTH_PATH));
+                (codex_endpoint_identity(config, auth) == remote).then(|| (*id).clone())
+            }));
+        }
+    }
+
+    Ok(None)
+}
+
+/// Where a Codex config sends requests and with which credential: the active
+/// custom provider's endpoint, or the built-in OpenAI route and its login.
+fn codex_endpoint_identity(config_text: Option<&str>, auth_text: Option<&str>) -> Option<Value> {
+    let table = toml::from_str::<toml::Table>(config_text.unwrap_or_default()).ok()?;
+    let auth = auth_text.and_then(|text| serde_json::from_str::<Value>(text).ok());
+    let auth_str = |key: &str| {
+        auth.as_ref()
+            .and_then(|auth| auth.get(key))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    let url = |value: Option<&toml::Value>| {
+        value
+            .and_then(toml::Value::as_str)
+            .map(|url| url.trim().trim_end_matches('/').to_string())
+    };
+
+    let provider_id = table
+        .get("model_provider")
+        .and_then(toml::Value::as_str)
+        .unwrap_or("openai");
+    if let Some(provider) = table
+        .get("model_providers")
+        .and_then(|providers| providers.get(provider_id))
+        .and_then(toml::Value::as_table)
+    {
+        let key = provider
+            .get("experimental_bearer_token")
+            .and_then(toml::Value::as_str)
+            .map(|token| token.trim().to_string())
+            .or_else(|| auth_str("OPENAI_API_KEY"));
+        return Some(json!({
+            "base_url": url(provider.get("base_url")),
+            "wire_api": provider
+                .get("wire_api")
+                .and_then(toml::Value::as_str)
+                .unwrap_or("responses"),
+            "key": key,
+        }));
+    }
+
+    let account = auth
+        .as_ref()
+        .and_then(|auth| auth.pointer("/tokens/account_id"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Some(json!({
+        "provider": provider_id,
+        "base_url": url(table.get("openai_base_url")),
+        "key": auth_str("OPENAI_API_KEY"),
+        "account": account,
     }))
 }
 
@@ -829,35 +932,45 @@ pub(super) fn build_remote_codex_writes(
     Ok(writes)
 }
 
-/// Tables that belong to the remote host rather than to the provider: its MCP
-/// servers (provider snapshots are stored without them) and the project trust
-/// and notice state Codex records itself.
-const REMOTE_OWNED_CODEX_TABLES: &[&str] = &["mcp_servers", "projects", "notice"];
+/// Keys that belong to the host rather than to the provider: its MCP servers
+/// (provider snapshots are stored without them), the project trust and notice
+/// state Codex records itself, and Codex Desktop / plugin state whose paths
+/// only make sense on the machine that wrote them.
+const REMOTE_OWNED_CODEX_TABLES: &[&str] = &[
+    "mcp_servers",
+    "projects",
+    "notice",
+    "desktop",
+    "marketplaces",
+    "plugins",
+    "notify",
+];
 
 fn preserve_remote_codex_tables(
     config_text: &str,
     remote_config_text: Option<&str>,
 ) -> Result<String, AppError> {
-    let Some(remote_doc) = remote_config_text.and_then(|text| text.parse::<DocumentMut>().ok())
-    else {
-        return Ok(config_text.to_string());
-    };
-    if !REMOTE_OWNED_CODEX_TABLES
-        .iter()
-        .any(|key| remote_doc.contains_key(key))
-    {
-        return Ok(config_text.to_string());
-    }
-
+    let remote_doc = remote_config_text
+        .and_then(|text| text.parse::<DocumentMut>().ok())
+        .unwrap_or_default();
     let mut doc = config_text
         .parse::<DocumentMut>()
         .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
+    let mut changed = false;
     for key in REMOTE_OWNED_CODEX_TABLES {
-        if let Some(item) = remote_doc.get(key) {
-            doc.insert(key, item.clone());
+        match remote_doc.get(key) {
+            Some(item) => {
+                doc.insert(key, item.clone());
+                changed = true;
+            }
+            None => changed |= doc.remove(key).is_some(),
         }
     }
-    Ok(doc.to_string())
+    Ok(if changed {
+        doc.to_string()
+    } else {
+        config_text.to_string()
+    })
 }
 
 /// Replaces only the provider-owned part of the remote settings.json (endpoint,
@@ -1092,11 +1205,16 @@ const REMOTE_FILE_HEADER: &str = "__CC_SWITCH_FILE__ ";
 
 /// Prints `<header> <bytes>\n<content>` per file (`-` when missing), so all
 /// files come back in one SSH round trip and are split by exact byte length.
+/// Each file is copied once and both its size and bytes come from the copy, so
+/// a concurrent atomic replace (Codex refreshing auth.json, another switch)
+/// can't make the declared size disagree with the content.
 fn build_read_files_script(paths: &[&str]) -> String {
-    let mut script = String::new();
+    let mut script = String::from(
+        "umask 077\nt=$(mktemp \"${TMPDIR:-/tmp}/cc-switch-read.XXXXXX\") || exit 1\ntrap 'rm -f \"$t\"' EXIT\n",
+    );
     for path in paths {
         script.push_str(&format!(
-            "f=\"{path}\"; if [ -f \"$f\" ]; then printf '{REMOTE_FILE_HEADER}%s\\n' \"$(wc -c < \"$f\" | tr -d ' ')\"; cat \"$f\"; else printf '{REMOTE_FILE_HEADER}-\\n'; fi\n"
+            "f=\"{path}\"; if [ -f \"$f\" ] && cat \"$f\" > \"$t\" 2>/dev/null; then printf '{REMOTE_FILE_HEADER}%s\\n' \"$(wc -c < \"$t\" | tr -d ' ')\"; cat \"$t\"; else printf '{REMOTE_FILE_HEADER}-\\n'; fi\n"
         ));
     }
     script
@@ -1200,13 +1318,13 @@ fn remote_settings_from_snapshot(
                 return Ok(RemoteSettingsRead {
                     settings_config: None,
                     warnings: vec!["远端未找到 Claude Code settings.json".to_string()],
+                    invalid_files: Vec::new(),
                 });
             };
 
-            Ok(RemoteSettingsRead {
-                settings_config: Some(parse_remote_json(CLAUDE_SETTINGS_PATH, content)?),
-                warnings: Vec::new(),
-            })
+            let mut read = RemoteSettingsRead::default();
+            read.settings_config = read.parse_json(CLAUDE_SETTINGS_PATH, content);
+            Ok(read)
         }
         AppType::Codex => {
             let auth_content = snapshot.get(CODEX_AUTH_PATH);
@@ -1219,23 +1337,20 @@ fn remote_settings_from_snapshot(
             if config_content.is_none() {
                 warnings.push("远端未找到 Codex config.toml".to_string());
             }
+            let mut read = RemoteSettingsRead {
+                warnings,
+                ..Default::default()
+            };
             if auth_content.is_none() && config_content.is_none() {
-                return Ok(RemoteSettingsRead {
-                    settings_config: None,
-                    warnings,
-                });
+                return Ok(read);
             }
 
-            let auth = match auth_content {
-                Some(content) => parse_remote_json(CODEX_AUTH_PATH, content)?,
-                None => json!({}),
-            };
-            Ok(RemoteSettingsRead {
-                settings_config: Some(
-                    json!({ "auth": auth, "config": config_content.unwrap_or_default() }),
-                ),
-                warnings,
-            })
+            let auth = auth_content
+                .and_then(|content| read.parse_json(CODEX_AUTH_PATH, content))
+                .unwrap_or_else(|| json!({}));
+            read.settings_config =
+                Some(json!({ "auth": auth, "config": config_content.unwrap_or_default() }));
+            Ok(read)
         }
         AppType::Gemini => {
             let env_content = snapshot.get(GEMINI_ENV_PATH);
@@ -1245,6 +1360,7 @@ fn remote_settings_from_snapshot(
                 return Ok(RemoteSettingsRead {
                     settings_config: None,
                     warnings: vec!["远端未找到 Gemini .env 或 settings.json".to_string()],
+                    invalid_files: Vec::new(),
                 });
             }
 
@@ -1261,31 +1377,43 @@ fn remote_settings_from_snapshot(
                 .unwrap_or_default();
             let env_json = crate::gemini_config::env_to_json(&env_map);
             let env_obj = env_json.get("env").cloned().unwrap_or_else(|| json!({}));
-            let settings = match settings_content {
-                Some(content) => {
-                    let value = parse_remote_json(GEMINI_SETTINGS_PATH, content)?;
-                    if !value.is_object() {
-                        return Err(AppError::Message(
-                            "远端 Gemini settings.json 必须是 JSON 对象".to_string(),
-                        ));
-                    }
-                    value
-                }
-                None => json!({}),
-            };
-
-            Ok(RemoteSettingsRead {
-                settings_config: Some(json!({ "env": env_obj, "config": settings })),
+            let mut read = RemoteSettingsRead {
                 warnings,
-            })
+                ..Default::default()
+            };
+            let settings = settings_content
+                .and_then(|content| read.parse_json(GEMINI_SETTINGS_PATH, content))
+                .filter(Value::is_object)
+                .unwrap_or_else(|| json!({}));
+            read.settings_config = Some(json!({ "env": env_obj, "config": settings }));
+            Ok(read)
         }
         _ => unreachable!("unsupported app type checked by caller"),
     }
 }
 
-fn parse_remote_json(path: &str, content: &str) -> Result<Value, AppError> {
-    serde_json::from_str::<Value>(content)
-        .map_err(|e| AppError::Message(format!("解析远端 {path} 失败: {e}")))
+impl RemoteSettingsRead {
+    /// A broken remote file (e.g. a hand edit) becomes a warning instead of
+    /// failing the whole inspection.
+    fn parse_json(&mut self, path: &str, content: &str) -> Option<Value> {
+        let display = path.replace("$HOME", "~");
+        match serde_json::from_str::<Value>(content) {
+            Ok(value) if value.is_object() => Some(value),
+            Ok(_) => {
+                self.warnings
+                    .push(format!("远端 {display} 不是 JSON 对象，已忽略其内容"));
+                self.invalid_files.push(display);
+                None
+            }
+            Err(e) => {
+                self.warnings.push(format!(
+                    "远端 {display} 不是合法 JSON（{e}），已忽略其内容；请在服务器上修复或删除该文件"
+                ));
+                self.invalid_files.push(display);
+                None
+            }
+        }
+    }
 }
 
 pub(super) fn parse_json_object_or_empty(content: &str) -> Value {
@@ -1708,7 +1836,79 @@ fn wildcard_match(pattern: &str, value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn codex_endpoint_identity_ignores_model_and_host_state() {
+        let local = r#"model_provider = "custom"
+model = "gpt-5.4"
+notify = ["/Applications/Codex.app/notify"]
+
+[desktop]
+dock-icon-preference = "auto"
+
+[model_providers.custom]
+name = "pro"
+base_url = "https://api.example.com/v1/"
+wire_api = "responses"
+experimental_bearer_token = "sk-1"
+"#;
+        let remote = r#"model_provider = "custom"
+model = "gpt-5.5"
+model_reasoning_effort = "high"
+
+[model_providers.custom]
+name = "Remote"
+base_url = "https://api.example.com/v1"
+experimental_bearer_token = "sk-1"
+"#;
+        assert_eq!(
+            codex_endpoint_identity(Some(local), None),
+            codex_endpoint_identity(Some(remote), None)
+        );
+        let other_key = remote.replace("sk-1", "sk-2");
+        assert_ne!(
+            codex_endpoint_identity(Some(local), None),
+            codex_endpoint_identity(Some(&other_key), None)
+        );
+    }
+
+    #[test]
+    fn preserve_remote_codex_tables_drops_local_desktop_state() {
+        let local = r#"model = "gpt-5.4"
+notify = ["/Applications/Codex.app/notify"]
+
+[desktop]
+dock-icon-preference = "auto"
+
+[marketplaces.openai-bundled]
+source = "/Applications/Codex.app/plugins"
+"#;
+        let remote = r#"[marketplaces.openai-bundled]
+source = "/root/.codex/plugins"
+"#;
+        let merged = preserve_remote_codex_tables(local, Some(remote)).unwrap();
+        assert!(merged.contains("model = \"gpt-5.4\""));
+        assert!(merged.contains("/root/.codex/plugins"));
+        assert!(!merged.contains("/Applications/Codex.app"));
+        assert!(!merged.contains("[desktop]"));
+    }
+
+    #[test]
+    fn broken_remote_auth_json_is_a_warning() {
+        let snapshot = RemoteSnapshot {
+            files: vec![
+                (
+                    CODEX_AUTH_PATH,
+                    Some("{\n  \"OPENAI_API_KEY\": \"x\"\n}}\n".to_string()),
+                ),
+                (CODEX_CONFIG_PATH, Some("model = \"m\"\n".to_string())),
+            ],
+        };
+        let read = remote_settings_from_snapshot(&AppType::Codex, &snapshot).unwrap();
+        assert_eq!(read.invalid_files, vec!["~/.codex/auth.json".to_string()]);
+        assert!(read.warnings.iter().any(|w| w.contains("auth.json")));
+        assert_eq!(read.settings_config.unwrap()["config"], "model = \"m\"\n");
+    }
 
     #[test]
     fn parse_ssh_config_collects_plain_hosts_and_metadata() {
@@ -1912,7 +2112,10 @@ trust_level = "trusted"
             Some("trusted")
         );
 
-        assert_eq!(preserve_remote_codex_tables(config, None)?, config);
+        let fresh = preserve_remote_codex_tables(config, None)?;
+        let fresh = fresh.parse::<DocumentMut>().unwrap();
+        assert!(fresh.get("mcp_servers").is_none());
+        assert_eq!(fresh["model"].as_str(), Some("gpt-5.5"));
         Ok(())
     }
 

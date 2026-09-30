@@ -11,22 +11,32 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::windows::process::CommandExt;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
-use toml_edit::DocumentMut;
+use serde_json::{json, Value};
+use toml_edit::{DocumentMut, Item};
 
 use crate::app_config::AppType;
 use crate::error::AppError;
 use crate::provider::Provider;
 use crate::store::AppState;
 
-use super::gemini_auth::{detect_gemini_auth_type, GeminiAuthType};
-use super::live::{build_effective_settings_with_common_config, sanitize_claude_settings_for_live};
+use super::codex_direct;
+use crate::codex_config::codex_auth_has_credential_login_material;
+use crate::live::patch::toml::{TomlDocPatch, TomlSteps};
+use crate::live::patch::{LivePatch, LiveWriteError};
+use crate::live::project::claude::{direct_patch as claude_direct_patch, ClaudeProjection};
+use crate::live::project::codex::{
+    requires_openai_auth, RouteAuth, RouteWrite, OFFICIAL_PROXY_ROUTE_ID, ROUTE_ID,
+};
+use crate::live::project::gemini::GeminiProjection;
 
 pub(super) const CLAUDE_SETTINGS_PATH: &str = "$HOME/.claude/settings.json";
 pub(super) const CODEX_AUTH_PATH: &str = "$HOME/.codex/auth.json";
 pub(super) const CODEX_CONFIG_PATH: &str = "$HOME/.codex/config.toml";
 pub(super) const GEMINI_ENV_PATH: &str = "$HOME/.gemini/.env";
 pub(super) const GEMINI_SETTINGS_PATH: &str = "$HOME/.gemini/settings.json";
+/// Written next to config.toml when the provider needs a model catalog; not
+/// part of the snapshot.
+const CODEX_CATALOG_PATH: &str = "$HOME/.codex/cc-switch-model-catalog.json";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -214,28 +224,25 @@ impl RemoteProviderService {
 
         let snapshot = read_remote_snapshot(&app_type, &target)?;
         let has_existing_config = snapshot.has_any();
-        if has_existing_config
-            && !force_overwrite
-            && !super::remote_gateway::snapshot_uses_gateway(&state.db, host_alias, &snapshot)
-        {
-            let remote_settings = remote_settings_from_snapshot(&app_type, &snapshot)?;
-            let matched = find_matching_local_provider(
-                state,
-                &app_type,
-                &snapshot,
-                remote_settings.settings_config.as_ref(),
-            )?;
-            if matched.is_none() {
-                return Err(AppError::Message(remote_overwrite_block_message(
-                    &app_type, host_alias,
-                )));
-            }
+        let via_gateway =
+            super::remote_gateway::snapshot_uses_gateway(&state.db, host_alias, &snapshot);
+        let prev = if via_gateway {
+            None
+        } else {
+            matched_remote_provider(state, &app_type, &snapshot)?
+        };
+        if has_existing_config && !force_overwrite && !via_gateway && prev.is_none() {
+            return Err(AppError::Message(remote_overwrite_block_message(
+                &app_type, host_alias,
+            )));
         }
 
-        let writes: Vec<RemoteWrite> = build_remote_writes(state, &app_type, provider, &snapshot)?
-            .into_iter()
-            .filter(|write| write.content.is_some() || snapshot.get(write.path).is_some())
-            .collect();
+        let writes: Vec<RemoteWrite> =
+            build_remote_writes(state, &app_type, prev.as_ref(), provider, &snapshot)?
+                .into_iter()
+                .filter(|write| write.content.as_deref() != snapshot.get(write.path))
+                .filter(|write| write.content.is_some() || snapshot.get(write.path).is_some())
+                .collect();
         let (written_files, removed_files) = apply_remote_writes(&target, &writes)?;
 
         let mut after = snapshot;
@@ -624,6 +631,27 @@ fn ensure_known_ssh_host(host_alias: &str) -> Result<(), AppError> {
     )))
 }
 
+/// The local provider the remote files currently correspond to.
+pub(super) fn matched_remote_provider(
+    state: &AppState,
+    app_type: &AppType,
+    snapshot: &RemoteSnapshot,
+) -> Result<Option<Provider>, AppError> {
+    if !snapshot.has_any() {
+        return Ok(None);
+    }
+    let read = remote_settings_from_snapshot(app_type, snapshot)?;
+    let Some(id) =
+        find_matching_local_provider(state, app_type, snapshot, read.settings_config.as_ref())?
+    else {
+        return Ok(None);
+    };
+    Ok(state
+        .db
+        .get_all_providers(app_type.as_str())?
+        .shift_remove(&id))
+}
+
 /// A local provider matches when it was imported verbatim from the remote, or
 /// when pushing it now would leave the remote files unchanged.
 fn find_matching_local_provider(
@@ -652,7 +680,7 @@ fn find_matching_local_provider(
         .filter_map(|(id, provider)| {
             Some((
                 id,
-                build_remote_writes(state, app_type, provider, snapshot).ok()?,
+                build_remote_writes(state, app_type, None, provider, snapshot).ok()?,
             ))
         })
         .collect();
@@ -747,15 +775,18 @@ fn codex_endpoint_identity(config_text: Option<&str>, auth_text: Option<&str>) -
 }
 
 fn remote_writes_match_snapshot(writes: &[RemoteWrite], snapshot: &RemoteSnapshot) -> bool {
-    writes.iter().all(
-        |write| match (write.content.as_deref(), snapshot.get(write.path)) {
-            (None, None) => true,
-            (Some(expected), Some(actual)) => {
-                remote_contents_equivalent(write.path, expected, actual)
-            }
-            _ => false,
-        },
-    )
+    writes
+        .iter()
+        .filter(|write| write.path != CODEX_CATALOG_PATH)
+        .all(
+            |write| match (write.content.as_deref(), snapshot.get(write.path)) {
+                (None, None) => true,
+                (Some(expected), Some(actual)) => {
+                    remote_contents_equivalent(write.path, expected, actual)
+                }
+                _ => false,
+            },
+        )
 }
 
 fn remote_contents_equivalent(path: &str, expected: &str, actual: &str) -> bool {
@@ -852,331 +883,206 @@ fn slugify_id_fragment(value: &str) -> String {
     }
 }
 
+/// Direct-mode writes for `provider`, patched onto the current remote files
+/// the same way a local switch patches the local ones: only the key fields
+/// change, the host's own settings stay. `prev` is the provider the remote
+/// currently matches; the exclusive fields it brought in are removed.
 fn build_remote_writes(
     state: &AppState,
     app_type: &AppType,
+    prev: Option<&Provider>,
     provider: &Provider,
     snapshot: &RemoteSnapshot,
 ) -> Result<Vec<RemoteWrite>, AppError> {
-    let effective_settings =
-        build_effective_settings_with_common_config(state.db.as_ref(), app_type, provider)?;
-
     match app_type {
-        AppType::Claude => {
-            let settings = merge_remote_claude_settings(
-                &sanitize_claude_settings_for_live(&effective_settings),
-                snapshot.get(CLAUDE_SETTINGS_PATH),
-            )?;
-            Ok(vec![RemoteWrite {
-                path: CLAUDE_SETTINGS_PATH,
-                content: Some(json_pretty(&settings)?),
-            }])
+        AppType::Claude => Ok(vec![claude_remote_write(
+            prev,
+            &ClaudeProjection::of(&provider.settings_config),
+            snapshot,
+        )?]),
+        AppType::Codex => build_remote_codex_writes(
+            state.db.as_ref(),
+            prev,
+            codex_direct::Target::Direct(Some(provider)),
+            None,
+            snapshot,
+        ),
+        AppType::Gemini => {
+            gemini_remote_writes(&super::gemini_direct::projection(provider)?, snapshot)
         }
-        AppType::Codex => build_remote_codex_writes(provider, &effective_settings, snapshot),
-        AppType::Gemini => build_remote_gemini_writes(provider, &effective_settings, snapshot),
         _ => unreachable!("unsupported app type checked by caller"),
     }
 }
 
-/// Mirrors the local Codex switch plan (bearer-token injection, auth.json
-/// ownership, safety gates) against the remote files.
-pub(super) fn build_remote_codex_writes(
-    provider: &Provider,
-    effective_settings: &Value,
+pub(super) fn patch_remote_file(
+    patch: &dyn LivePatch,
+    path: &'static str,
     snapshot: &RemoteSnapshot,
-) -> Result<Vec<RemoteWrite>, AppError> {
-    let obj = effective_settings
-        .as_object()
-        .ok_or_else(|| AppError::Config("Codex 供应商配置必须是 JSON 对象".to_string()))?;
-    let auth = obj
-        .get("auth")
-        .ok_or_else(|| AppError::Config("Codex 供应商配置缺少 'auth' 字段".to_string()))?;
-    let config_text = obj.get("config").and_then(Value::as_str);
-
-    let category = if crate::proxy::providers::is_codex_official_provider(provider) {
-        Some("official")
-    } else {
-        provider.category.as_deref()
-    };
-    let plan = crate::codex_config::plan_codex_live_write(
-        category,
-        auth,
-        config_text,
-        crate::settings::preserve_codex_official_auth_on_switch(),
-    )?;
-
-    let mut writes = Vec::new();
-    if plan.write_full_auth {
-        writes.push(RemoteWrite {
-            path: CODEX_AUTH_PATH,
-            content: Some(json_pretty(auth)?),
-        });
-    } else if plan.remove_auth_file {
-        writes.push(RemoteWrite {
-            path: CODEX_AUTH_PATH,
-            content: None,
-        });
-    }
-
-    if let Some(config_text) = plan.config_text {
-        let anchor = snapshot
-            .get(CODEX_CONFIG_PATH)
-            .filter(|text| !text.trim().is_empty());
-        let config_text = anchor_codex_model_provider_id(&config_text, anchor)?;
-        writes.push(RemoteWrite {
-            path: CODEX_CONFIG_PATH,
-            content: Some(preserve_remote_codex_tables(&config_text, anchor)?),
-        });
-    }
-
-    Ok(writes)
-}
-
-/// Keys that belong to the host rather than to the provider: its MCP servers
-/// (provider snapshots are stored without them), the project trust and notice
-/// state Codex records itself, and Codex Desktop / plugin state whose paths
-/// only make sense on the machine that wrote them.
-const REMOTE_OWNED_CODEX_TABLES: &[&str] = &[
-    "mcp_servers",
-    "projects",
-    "notice",
-    "desktop",
-    "marketplaces",
-    "plugins",
-    "notify",
-];
-
-fn preserve_remote_codex_tables(
-    config_text: &str,
-    remote_config_text: Option<&str>,
-) -> Result<String, AppError> {
-    let remote_doc = remote_config_text
-        .and_then(|text| text.parse::<DocumentMut>().ok())
-        .unwrap_or_default();
-    let mut doc = config_text
-        .parse::<DocumentMut>()
-        .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
-    let mut changed = false;
-    for key in REMOTE_OWNED_CODEX_TABLES {
-        match remote_doc.get(key) {
-            Some(item) => {
-                doc.insert(key, item.clone());
-                changed = true;
-            }
-            None => changed |= doc.remove(key).is_some(),
-        }
-    }
-    Ok(if changed {
-        doc.to_string()
-    } else {
-        config_text.to_string()
+) -> Result<RemoteWrite, AppError> {
+    let bytes = patch.apply(Path::new(path), snapshot.get(path).map(str::as_bytes))?;
+    let content = String::from_utf8(bytes)
+        .map_err(|e| AppError::Message(format!("{path} 写入内容不是 UTF-8: {e}")))?;
+    Ok(RemoteWrite {
+        path,
+        content: Some(content),
     })
 }
 
-/// Replaces only the provider-owned part of the remote settings.json (endpoint,
-/// credentials, model mapping) and keeps the host's other settings. Local
-/// common-config keys fill in only what the remote doesn't set itself.
-pub(super) fn merge_remote_claude_settings(
-    provider_settings: &Value,
-    remote_settings_text: Option<&str>,
-) -> Result<Value, AppError> {
-    let Some(remote) = remote_settings_text
-        .and_then(|text| serde_json::from_str::<Value>(text).ok())
-        .filter(Value::is_object)
-    else {
-        return Ok(provider_settings.clone());
-    };
-
-    let common_of = |settings: &Value| -> Result<Map<String, Value>, AppError> {
-        let text = super::ProviderService::extract_claude_common_config(settings)?;
-        Ok(serde_json::from_str::<Value>(&text)
-            .ok()
-            .and_then(|value| value.as_object().cloned())
-            .unwrap_or_default())
-    };
-    let local_common = common_of(provider_settings)?;
-    let remote_common = common_of(&remote)?;
-
-    let mut merged = local_common.clone();
-    overlay_claude_settings(&mut merged, &remote_common, |_, _| true);
-    if let Some(provider_obj) = provider_settings.as_object() {
-        let local_common_env = local_common.get("env").and_then(Value::as_object);
-        overlay_claude_settings(&mut merged, provider_obj, |key, env_key| match env_key {
-            Some(env_key) => !local_common_env.is_some_and(|env| env.contains_key(env_key)),
-            None => !local_common.contains_key(key),
-        });
-    }
-
-    Ok(Value::Object(merged))
+pub(super) fn claude_remote_write(
+    prev: Option<&Provider>,
+    target: &ClaudeProjection,
+    snapshot: &RemoteSnapshot,
+) -> Result<RemoteWrite, AppError> {
+    let prev = prev.map(|provider| ClaudeProjection::of(&provider.settings_config));
+    let patch = claude_direct_patch(prev.as_ref(), target);
+    patch_remote_file(&patch, CLAUDE_SETTINGS_PATH, snapshot)
 }
 
-/// Copies `source` into `target`, merging `env` per variable. `include` gets the
-/// top-level key and, inside `env`, the variable name.
-fn overlay_claude_settings(
-    target: &mut Map<String, Value>,
-    source: &Map<String, Value>,
-    include: impl Fn(&str, Option<&str>) -> bool,
-) {
-    for (key, value) in source {
-        if key == "env" {
-            let Some(source_env) = value.as_object() else {
-                continue;
-            };
-            let entries: Vec<_> = source_env
-                .iter()
-                .filter(|(env_key, _)| include(key, Some(env_key)))
-                .collect();
-            if entries.is_empty() {
-                continue;
-            }
-            let target_env = target
-                .entry("env")
-                .or_insert_with(|| Value::Object(Map::new()));
-            if !target_env.is_object() {
-                *target_env = Value::Object(Map::new());
-            }
-            if let Some(target_env) = target_env.as_object_mut() {
-                for (env_key, env_value) in entries {
-                    target_env.insert(env_key.clone(), env_value.clone());
-                }
-            }
-        } else if include(key, None) {
-            target.insert(key.clone(), value.clone());
-        }
-    }
-}
-
-pub(super) fn active_codex_model_provider_id(doc: &DocumentMut) -> Option<String> {
-    doc.get("model_provider")
-        .and_then(|item| item.as_str())
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .map(str::to_string)
-}
-
-/// Keeps the remote's existing custom `model_provider` id when switching, so
-/// Codex session history on that host stays under a single provider bucket.
-fn anchor_codex_model_provider_id(
-    config_text: &str,
-    anchor_config_text: Option<&str>,
-) -> Result<String, AppError> {
-    if config_text.trim().is_empty() {
-        return Ok(config_text.to_string());
-    }
-
-    let mut doc = config_text
-        .parse::<DocumentMut>()
-        .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
-
-    let Some(source_id) = active_codex_model_provider_id(&doc) else {
-        return Ok(config_text.to_string());
-    };
-    if !crate::codex_config::is_custom_codex_model_provider_id(&source_id) {
-        return Ok(config_text.to_string());
-    }
-
-    let Some(anchor_id) = anchor_config_text
-        .and_then(|text| text.parse::<DocumentMut>().ok())
-        .and_then(|anchor_doc| active_codex_model_provider_id(&anchor_doc))
-        .filter(|id| crate::codex_config::is_custom_codex_model_provider_id(id))
-    else {
-        return Ok(config_text.to_string());
-    };
-    if anchor_id == source_id {
-        return Ok(config_text.to_string());
-    }
-
-    let Some(model_providers) = doc
-        .get_mut("model_providers")
-        .and_then(|item| item.as_table_mut())
-    else {
-        return Ok(config_text.to_string());
-    };
-    if model_providers.contains_key(&anchor_id) {
-        return Ok(config_text.to_string());
-    }
-    let Some(provider_table) = model_providers.remove(&source_id) else {
-        return Ok(config_text.to_string());
-    };
-    model_providers.insert(&anchor_id, provider_table);
-
-    if let Some(profiles) = doc
-        .get_mut("profiles")
-        .and_then(|item| item.as_table_like_mut())
-    {
-        let profile_keys: Vec<String> = profiles.iter().map(|(key, _)| key.to_string()).collect();
-        for profile_key in profile_keys {
-            let Some(profile) = profiles
-                .get_mut(&profile_key)
-                .and_then(|item| item.as_table_like_mut())
-            else {
-                continue;
-            };
-            if profile.get("model_provider").and_then(|item| item.as_str())
-                == Some(source_id.as_str())
-            {
-                profile.insert("model_provider", toml_edit::value(anchor_id.as_str()));
-            }
-        }
-    }
-    doc["model_provider"] = toml_edit::value(anchor_id.as_str());
-
-    Ok(doc.to_string())
-}
-
-fn build_remote_gemini_writes(
-    provider: &Provider,
-    effective_settings: &Value,
+pub(super) fn gemini_remote_writes(
+    projection: &GeminiProjection,
     snapshot: &RemoteSnapshot,
 ) -> Result<Vec<RemoteWrite>, AppError> {
-    use crate::gemini_config::{json_to_env, serialize_env_file, validate_gemini_settings_strict};
+    Ok(vec![
+        patch_remote_file(&projection.env_patch(), GEMINI_ENV_PATH, snapshot)?,
+        patch_remote_file(&projection.settings_patch(), GEMINI_SETTINGS_PATH, snapshot)?,
+    ])
+}
 
-    let auth_type = detect_gemini_auth_type(provider);
-    if matches!(
-        auth_type,
-        GeminiAuthType::Packycode | GeminiAuthType::Generic
-    ) {
-        validate_gemini_settings_strict(effective_settings)?;
-    }
+/// Runs the local Codex write plan against the remote files. The remote has
+/// no login stash or managed accounts, so its own ChatGPT login is never
+/// removed. `bearer_token` replaces the proxy placeholder in a proxy route.
+pub(super) fn build_remote_codex_writes(
+    db: &crate::database::Database,
+    prev: Option<&Provider>,
+    target: codex_direct::Target<'_>,
+    bearer_token: Option<&str>,
+    snapshot: &RemoteSnapshot,
+) -> Result<Vec<RemoteWrite>, AppError> {
+    let owner = prev.map_or(codex_direct::Owner::None, codex_direct::Owner::Provider);
+    let planned = codex_direct::plan(db, &owner, &target, &codex_direct::Prepared::default())?;
+    let mut config = planned.config;
 
-    let env_map = json_to_env(effective_settings)?;
-    let env_text = serialize_env_file(&env_map);
-
-    let mut settings_json =
-        parse_json_object_or_empty(snapshot.get(GEMINI_SETTINGS_PATH).unwrap_or_default());
-
-    if let Some(config_value) = effective_settings.get("config") {
-        if let Some(config_obj) = config_value.as_object() {
-            if let Some(target_obj) = settings_json.as_object_mut() {
-                for (key, value) in config_obj {
-                    target_obj.insert(key.clone(), value.clone());
-                }
-            }
-        } else if !config_value.is_null() {
-            return Err(AppError::localized(
-                "gemini.validation.invalid_config",
-                "Gemini 配置格式错误: config 必须是对象或 null",
-                "Gemini config invalid: config must be an object or null",
-            ));
+    let (auth_write, login_on_disk) =
+        remote_codex_auth(&planned.auth, snapshot.get(CODEX_AUTH_PATH))?;
+    if let RouteWrite::Custom(table) = &mut config.route {
+        if let Some(kind @ (RouteAuth::Bearer | RouteAuth::EnvKey)) = planned.stamp {
+            table.insert(
+                "requires_openai_auth",
+                toml_edit::value(requires_openai_auth(kind, login_on_disk)),
+            );
+        }
+        if let Some(token) = bearer_token {
+            table.insert("experimental_bearer_token", toml_edit::value(token));
         }
     }
 
-    let selected_type = match auth_type {
-        GeminiAuthType::GoogleOfficial => "oauth-personal",
-        GeminiAuthType::Packycode | GeminiAuthType::Generic => "gemini-api-key",
-    };
-    set_gemini_selected_type(&mut settings_json, selected_type);
+    let keep_id = KeepRemoteRouteId(remote_route_id(snapshot.get(CODEX_CONFIG_PATH)));
+    let mut writes: Vec<RemoteWrite> = auth_write.into_iter().collect();
+    writes.push(patch_remote_file(
+        &TomlSteps(vec![&config, &keep_id]),
+        CODEX_CONFIG_PATH,
+        snapshot,
+    )?);
+    if let Some(catalog) = planned.catalog {
+        writes.push(RemoteWrite {
+            path: CODEX_CATALOG_PATH,
+            content: Some(
+                String::from_utf8(catalog)
+                    .map_err(|e| AppError::Message(format!("Codex 模型目录不是 UTF-8: {e}")))?,
+            ),
+        });
+    }
+    Ok(writes)
+}
 
-    Ok(vec![
-        RemoteWrite {
-            path: GEMINI_ENV_PATH,
-            content: Some(env_text),
-        },
-        RemoteWrite {
-            path: GEMINI_SETTINGS_PATH,
-            content: Some(json_pretty(&settings_json)?),
-        },
-    ])
+/// Codex files sessions under the route's provider id, so a host that already
+/// routes through its own custom table keeps that id instead of `custom`;
+/// otherwise its earlier sessions could no longer be resumed.
+struct KeepRemoteRouteId(Option<String>);
+
+impl TomlDocPatch for KeepRemoteRouteId {
+    fn apply_to(&self, _path: &Path, doc: &mut DocumentMut) -> Result<(), LiveWriteError> {
+        let Some(id) = &self.0 else {
+            return Ok(());
+        };
+        if doc.get("model_provider").and_then(Item::as_str) != Some(ROUTE_ID) {
+            return Ok(());
+        }
+        let Some(providers) = doc
+            .get_mut("model_providers")
+            .and_then(Item::as_table_like_mut)
+        else {
+            return Ok(());
+        };
+        let Some(table) = providers.remove(ROUTE_ID) else {
+            return Ok(());
+        };
+        providers.insert(id, table);
+        if let Some(Item::Value(selector)) = doc.get_mut("model_provider") {
+            let decor = selector.decor().clone();
+            *selector = id.as_str().into();
+            *selector.decor_mut() = decor;
+        }
+        Ok(())
+    }
+}
+
+/// The remote's own custom route id, if it routes through one.
+fn remote_route_id(config: Option<&str>) -> Option<String> {
+    const NOT_CUSTOM: &[&str] = &[
+        ROUTE_ID,
+        OFFICIAL_PROXY_ROUTE_ID,
+        "openai",
+        "ollama",
+        "lmstudio",
+        "amazon-bedrock",
+        "amazon-bedrock-runtime",
+    ];
+    let doc = config?.parse::<DocumentMut>().ok()?;
+    let id = doc.get("model_provider")?.as_str()?.trim();
+    if id.is_empty() || NOT_CUSTOM.contains(&id) {
+        return None;
+    }
+    doc.get("model_providers")?
+        .as_table_like()?
+        .get(id)?
+        .as_table_like()?;
+    Some(id.to_string())
+}
+
+/// What happens to the remote `auth.json`, and whether a ChatGPT login stays
+/// on disk afterwards (decides `requires_openai_auth`).
+fn remote_codex_auth(
+    goal: &codex_direct::AuthGoal,
+    remote_auth: Option<&str>,
+) -> Result<(Option<RemoteWrite>, bool), AppError> {
+    use codex_direct::AuthGoal;
+
+    let remote = remote_auth.and_then(|text| serde_json::from_str::<Value>(text).ok());
+    let remote_login = remote
+        .as_ref()
+        .is_some_and(codex_auth_has_credential_login_material);
+    Ok(match goal {
+        AuthGoal::Official(auth) | AuthGoal::Managed(auth)
+            if codex_auth_has_credential_login_material(auth) =>
+        {
+            let write = RemoteWrite {
+                path: CODEX_AUTH_PATH,
+                content: Some(json_pretty(auth)?),
+            };
+            (Some(write), true)
+        }
+        // The key now lives in the route table; a key-only auth.json left
+        // behind would be sent nowhere and only confuses Codex's login screen.
+        AuthGoal::ThirdParty if remote.is_some() && !remote_login => (
+            Some(RemoteWrite {
+                path: CODEX_AUTH_PATH,
+                content: None,
+            }),
+            false,
+        ),
+        _ => (None, remote_login),
+    })
 }
 
 pub(super) fn remote_config_paths(app_type: &AppType) -> &'static [&'static str] {
@@ -1413,40 +1319,6 @@ impl RemoteSettingsRead {
                 None
             }
         }
-    }
-}
-
-pub(super) fn parse_json_object_or_empty(content: &str) -> Value {
-    serde_json::from_str::<Value>(content)
-        .ok()
-        .filter(Value::is_object)
-        .unwrap_or_else(|| json!({}))
-}
-
-pub(super) fn set_gemini_selected_type(settings: &mut Value, selected_type: &str) {
-    let Some(root) = settings.as_object_mut() else {
-        *settings = json!({});
-        return set_gemini_selected_type(settings, selected_type);
-    };
-
-    let security = root.entry("security").or_insert_with(|| json!({}));
-    if !security.is_object() {
-        *security = json!({});
-    }
-
-    let Some(security_obj) = security.as_object_mut() else {
-        return;
-    };
-    let auth = security_obj.entry("auth").or_insert_with(|| json!({}));
-    if !auth.is_object() {
-        *auth = json!({});
-    }
-
-    if let Some(auth_obj) = auth.as_object_mut() {
-        auth_obj.insert(
-            "selectedType".to_string(),
-            Value::String(selected_type.to_string()),
-        );
     }
 }
 
@@ -1873,24 +1745,121 @@ experimental_bearer_token = "sk-1"
     }
 
     #[test]
-    fn preserve_remote_codex_tables_drops_local_desktop_state() {
-        let local = r#"model = "gpt-5.4"
-notify = ["/Applications/Codex.app/notify"]
+    fn claude_remote_write_replaces_key_fields_and_keeps_host_settings() {
+        let remote = json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://old.example.com",
+                "ANTHROPIC_API_KEY": "old-key",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "old-opus",
+                "HTTPS_PROXY": "http://proxy:3128"
+            },
+            "permissions": { "allow": ["Bash(ls)"] },
+            "hooks": { "Stop": [] }
+        });
+        let snapshot = RemoteSnapshot {
+            files: vec![(CLAUDE_SETTINGS_PATH, Some(remote.to_string()))],
+        };
+        let target = ClaudeProjection::of(&json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://new.example.com",
+                "ANTHROPIC_AUTH_TOKEN": "new-token",
+                "ANTHROPIC_MODEL": "new-model"
+            }
+        }));
 
-[desktop]
-dock-icon-preference = "auto"
+        let write = claude_remote_write(None, &target, &snapshot).unwrap();
+        let written: Value = serde_json::from_str(write.content.as_deref().unwrap()).unwrap();
 
-[marketplaces.openai-bundled]
-source = "/Applications/Codex.app/plugins"
+        assert_eq!(
+            written["env"]["ANTHROPIC_BASE_URL"],
+            "https://new.example.com"
+        );
+        assert_eq!(written["env"]["ANTHROPIC_AUTH_TOKEN"], "new-token");
+        assert_eq!(written["env"]["ANTHROPIC_MODEL"], "new-model");
+        assert!(written["env"].get("ANTHROPIC_API_KEY").is_none());
+        assert!(written["env"].get("ANTHROPIC_DEFAULT_OPUS_MODEL").is_none());
+        assert_eq!(written["env"]["HTTPS_PROXY"], "http://proxy:3128");
+        assert_eq!(written["permissions"], remote["permissions"]);
+        assert_eq!(written["hooks"], remote["hooks"]);
+    }
+
+    #[test]
+    fn claude_remote_write_refuses_broken_settings() {
+        let snapshot = RemoteSnapshot {
+            files: vec![(CLAUDE_SETTINGS_PATH, Some("{\"env\": {}}}".to_string()))],
+        };
+        assert!(claude_remote_write(None, &ClaudeProjection::default(), &snapshot).is_err());
+    }
+
+    #[test]
+    fn remote_codex_auth_never_drops_a_remote_login() {
+        use codex_direct::AuthGoal;
+
+        let login = json!({ "tokens": { "access_token": "at", "account_id": "acc" } }).to_string();
+        let (write, login_on_disk) =
+            remote_codex_auth(&AuthGoal::ThirdParty, Some(&login)).unwrap();
+        assert!(write.is_none());
+        assert!(login_on_disk);
+
+        let key_only = json!({ "OPENAI_API_KEY": "sk-old" }).to_string();
+        let (write, login_on_disk) =
+            remote_codex_auth(&AuthGoal::ThirdParty, Some(&key_only)).unwrap();
+        assert!(write.is_some_and(|write| write.content.is_none()));
+        assert!(!login_on_disk);
+
+        let (write, _) = remote_codex_auth(&AuthGoal::ThirdParty, Some("{ broken")).unwrap();
+        assert!(write.is_none());
+
+        let row = json!({ "tokens": { "refresh_token": "rt" } });
+        let (write, login_on_disk) =
+            remote_codex_auth(&AuthGoal::Official(row), Some(&key_only)).unwrap();
+        assert!(write.unwrap().content.unwrap().contains("refresh_token"));
+        assert!(login_on_disk);
+
+        let (write, login_on_disk) =
+            remote_codex_auth(&AuthGoal::Official(json!({})), Some(&login)).unwrap();
+        assert!(write.is_none());
+        assert!(login_on_disk);
+    }
+
+    #[test]
+    fn remote_codex_route_keeps_the_hosts_provider_id() {
+        let remote = r#"model_provider = "OpenAI" # remote bucket
+model = "gpt-5.5"
+
+[model_providers.OpenAI]
+name = "old"
+base_url = "https://old.example.com/v1"
+experimental_bearer_token = "sk-old"
+
+[mcp_servers.tool]
+command = "tool"
 "#;
-        let remote = r#"[marketplaces.openai-bundled]
-source = "/root/.codex/plugins"
-"#;
-        let merged = preserve_remote_codex_tables(local, Some(remote)).unwrap();
-        assert!(merged.contains("model = \"gpt-5.4\""));
-        assert!(merged.contains("/root/.codex/plugins"));
-        assert!(!merged.contains("/Applications/Codex.app"));
-        assert!(!merged.contains("[desktop]"));
+        let mut doc = remote.parse::<DocumentMut>().unwrap();
+        doc["model_provider"] = toml_edit::value(ROUTE_ID);
+        let mut table = toml_edit::Table::new();
+        table.insert("name", toml_edit::value("new"));
+        table.insert("base_url", toml_edit::value("https://new.example.com/v1"));
+        doc["model_providers"]
+            .as_table_like_mut()
+            .unwrap()
+            .insert(ROUTE_ID, toml_edit::Item::Table(table));
+
+        KeepRemoteRouteId(remote_route_id(Some(remote)))
+            .apply_to(Path::new(CODEX_CONFIG_PATH), &mut doc)
+            .unwrap();
+
+        assert_eq!(doc["model_provider"].as_str(), Some("OpenAI"));
+        assert_eq!(
+            doc["model_providers"]["OpenAI"]["base_url"].as_str(),
+            Some("https://new.example.com/v1")
+        );
+        assert!(doc["model_providers"].get(ROUTE_ID).is_none());
+        assert!(!doc.to_string().contains("sk-old"));
+        assert_eq!(doc["mcp_servers"]["tool"]["command"].as_str(), Some("tool"));
+
+        assert_eq!(remote_route_id(Some("model_provider = \"openai\"\n")), None);
+        assert_eq!(remote_route_id(Some("model_provider = \"x\"\n")), None);
     }
 
     #[test]
@@ -1993,49 +1962,6 @@ Host "quoted"
     }
 
     #[test]
-    fn anchor_codex_model_provider_id_keeps_remote_bucket() -> Result<(), AppError> {
-        let config = r#"model_provider = "packy"
-model = "gpt-5.5"
-
-[model_providers.packy]
-name = "packy"
-base_url = "https://example.com/v1"
-experimental_bearer_token = "sk-test"
-
-[profiles.fast]
-model_provider = "packy"
-"#;
-        let anchor =
-            "model_provider = \"remote_main\"\n\n[model_providers.remote_main]\nname = \"old\"\n";
-
-        let anchored = anchor_codex_model_provider_id(config, Some(anchor))?;
-        let doc = anchored.parse::<DocumentMut>().unwrap();
-
-        assert_eq!(doc["model_provider"].as_str(), Some("remote_main"));
-        assert_eq!(
-            doc["profiles"]["fast"]["model_provider"].as_str(),
-            Some("remote_main")
-        );
-        assert_eq!(
-            doc["model_providers"]["remote_main"]["experimental_bearer_token"].as_str(),
-            Some("sk-test")
-        );
-        assert!(doc["model_providers"].get("packy").is_none());
-        Ok(())
-    }
-
-    #[test]
-    fn anchor_codex_model_provider_id_ignores_reserved_anchor() -> Result<(), AppError> {
-        let config = "model_provider = \"packy\"\n\n[model_providers.packy]\nname = \"packy\"\n";
-
-        let anchored =
-            anchor_codex_model_provider_id(config, Some("model_provider = \"openai\"\n"))?;
-
-        assert_eq!(anchored, config);
-        Ok(())
-    }
-
-    #[test]
     fn remote_writes_match_ignores_codex_runtime_tables_and_json_formatting() {
         let snapshot = RemoteSnapshot {
             files: vec![
@@ -2072,101 +1998,6 @@ model_provider = "packy"
             content: Some("model = \"gpt-5.4\"\n".to_string()),
         }];
         assert!(!remote_writes_match_snapshot(&mismatched, &snapshot));
-    }
-
-    #[test]
-    fn preserve_remote_codex_tables_keeps_remote_mcp_and_trust() -> Result<(), AppError> {
-        let config = r#"model_provider = "packy"
-model = "gpt-5.5"
-
-[model_providers.packy]
-base_url = "https://example.com/v1"
-
-[mcp_servers.local_only]
-command = "local"
-"#;
-        let remote = r#"model = "gpt-5.4"
-
-[mcp_servers.remote_tool]
-command = "remote"
-
-[projects."/srv/app"]
-trust_level = "trusted"
-"#;
-
-        let merged = preserve_remote_codex_tables(config, Some(remote))?;
-        let doc = merged.parse::<DocumentMut>().unwrap();
-
-        assert_eq!(doc["model"].as_str(), Some("gpt-5.5"));
-        assert_eq!(
-            doc["model_providers"]["packy"]["base_url"].as_str(),
-            Some("https://example.com/v1")
-        );
-        assert_eq!(
-            doc["mcp_servers"]["remote_tool"]["command"].as_str(),
-            Some("remote")
-        );
-        assert!(doc["mcp_servers"].get("local_only").is_none());
-        assert_eq!(
-            doc["projects"]["/srv/app"]["trust_level"].as_str(),
-            Some("trusted")
-        );
-
-        let fresh = preserve_remote_codex_tables(config, None)?;
-        let fresh = fresh.parse::<DocumentMut>().unwrap();
-        assert!(fresh.get("mcp_servers").is_none());
-        assert_eq!(fresh["model"].as_str(), Some("gpt-5.5"));
-        Ok(())
-    }
-
-    #[test]
-    fn merge_remote_claude_settings_replaces_only_provider_keys() -> Result<(), AppError> {
-        let provider = json!({
-            "env": {
-                "ANTHROPIC_BASE_URL": "https://new.example.com",
-                "ANTHROPIC_AUTH_TOKEN": "new-token",
-                "ANTHROPIC_MODEL": "new-model",
-                "SHARED_FLAG": "local"
-            },
-            "includeCoAuthoredBy": false
-        });
-        let remote = json!({
-            "env": {
-                "ANTHROPIC_BASE_URL": "https://old.example.com",
-                "ANTHROPIC_API_KEY": "old-key",
-                "ANTHROPIC_DEFAULT_OPUS_MODEL": "old-opus",
-                "SHARED_FLAG": "remote",
-                "HTTPS_PROXY": "http://proxy:3128"
-            },
-            "permissions": { "allow": ["Bash(ls)"] },
-            "hooks": { "Stop": [] }
-        })
-        .to_string();
-
-        let merged = merge_remote_claude_settings(&provider, Some(&remote))?;
-
-        assert_eq!(
-            merged,
-            json!({
-                "env": {
-                    "ANTHROPIC_BASE_URL": "https://new.example.com",
-                    "ANTHROPIC_AUTH_TOKEN": "new-token",
-                    "ANTHROPIC_MODEL": "new-model",
-                    "SHARED_FLAG": "remote",
-                    "HTTPS_PROXY": "http://proxy:3128"
-                },
-                "includeCoAuthoredBy": false,
-                "permissions": { "allow": ["Bash(ls)"] },
-                "hooks": { "Stop": [] }
-            })
-        );
-
-        assert_eq!(merge_remote_claude_settings(&provider, None)?, provider);
-        assert_eq!(
-            merge_remote_claude_settings(&provider, Some("not json"))?,
-            provider
-        );
-        Ok(())
     }
 
     #[cfg(unix)]

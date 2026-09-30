@@ -18,18 +18,19 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{watch, Mutex};
 
 use super::remote::{
-    apply_remote_writes, build_remote_codex_writes, ensure_remote_supported, json_pretty,
-    merge_remote_claude_settings, parse_json_object_or_empty, read_remote_snapshot,
-    remote_state_from_snapshot, resolve_ssh_target, set_gemini_selected_type, InFlightGuard,
-    RemoteSnapshot, RemoteWrite, ResolvedSshTarget, CLAUDE_SETTINGS_PATH, GEMINI_ENV_PATH,
-    GEMINI_SETTINGS_PATH,
+    apply_remote_writes, build_remote_codex_writes, claude_remote_write, ensure_remote_supported,
+    gemini_remote_writes, matched_remote_provider, read_remote_snapshot,
+    remote_state_from_snapshot, resolve_ssh_target, InFlightGuard, RemoteSnapshot, RemoteWrite,
+    ResolvedSshTarget,
 };
-use super::{
-    build_effective_settings_with_common_config, RemoteProviderState, SshConnectionTarget,
-};
+use super::{codex_direct, gemini_direct, RemoteProviderState, SshConnectionTarget};
 use crate::app_config::AppType;
 use crate::database::Database;
 use crate::error::AppError;
+use crate::live::project::claude::{
+    proxy_projection, ClaudeProjection, ProxyAuth, PROXY_TOKEN_PLACEHOLDER,
+};
+use crate::live::project::gemini::GeminiProjection;
 use crate::provider::Provider;
 use crate::proxy::remote_gateway::{provider_usable_remotely, RemoteGatewayListener, RouterSource};
 use crate::services::ProxyService;
@@ -584,19 +585,17 @@ fn gateway_url(remote_port: u16) -> String {
     format!("http://127.0.0.1:{remote_port}")
 }
 
-/// The provider a route resolves to right now: the pinned one, else the local
-/// current provider.
+/// The provider a route resolves to right now: the pinned one, else the one
+/// the local proxy is sending requests to.
 fn routed_provider(
     state: &AppState,
     app: &AppType,
     provider_id: Option<&str>,
 ) -> Result<Option<Provider>, AppError> {
-    let mut providers = state.db.get_all_providers(app.as_str())?;
-    let id = match provider_id {
-        Some(id) => Some(id.to_string()),
-        None => crate::settings::get_effective_current_provider(&state.db, app)?,
-    };
-    Ok(id.and_then(|id| providers.shift_remove(&id)))
+    match provider_id {
+        Some(id) => state.db.get_provider_by_id(id, app.as_str()),
+        None => crate::mode::current::provider_in_use(&state.db, app),
+    }
 }
 
 fn validate_pinned_provider(
@@ -621,110 +620,80 @@ fn validate_pinned_provider(
     Ok(())
 }
 
+/// Same client contract as local proxy takeover, with the gateway token in
+/// place of the placeholder key.
 fn build_gateway_writes(
     state: &AppState,
     app: &AppType,
     record: &GatewayRecord,
+    prev: Option<&Provider>,
     provider: Option<&Provider>,
     snapshot: &RemoteSnapshot,
 ) -> Result<Vec<RemoteWrite>, AppError> {
     let url = gateway_url(record.remote_port);
     match app {
         AppType::Claude => {
-            let settings = json!({
-                "env": {
-                    "ANTHROPIC_BASE_URL": url,
-                    "ANTHROPIC_AUTH_TOKEN": record.token,
+            let route = provider
+                .map(|provider| ClaudeProjection::of(&provider.settings_config))
+                .unwrap_or_default();
+            let mut projection = proxy_projection(&route, &url, ProxyAuth::FollowRow);
+            for value in projection.env.values_mut() {
+                if value.as_str() == Some(PROXY_TOKEN_PLACEHOLDER) {
+                    *value = Value::String(record.token.clone());
                 }
-            });
-            let merged =
-                merge_remote_claude_settings(&settings, snapshot.get(CLAUDE_SETTINGS_PATH))?;
-            Ok(vec![RemoteWrite {
-                path: CLAUDE_SETTINGS_PATH,
-                content: Some(json_pretty(&merged)?),
-            }])
+            }
+            Ok(vec![claude_remote_write(prev, &projection, snapshot)?])
         }
         AppType::Codex => {
             let provider = provider.ok_or_else(|| {
                 AppError::Message("本机 Codex 没有当前供应商，请先选择一个供应商".to_string())
             })?;
-            build_gateway_codex_writes(state, provider, &url, &record.token, snapshot)
+            let base_url = format!("{url}/v1");
+            // An official route would make the remote send its own ChatGPT login;
+            // requests for it are refused anyway, so keep the third-party shape
+            // and let the next local switch take effect without a rewrite.
+            let placeholder;
+            let route = if provider_usable_remotely(provider) {
+                provider
+            } else {
+                placeholder = gateway_placeholder_codex_provider(&base_url);
+                &placeholder
+            };
+            build_remote_codex_writes(
+                state.db.as_ref(),
+                prev,
+                codex_direct::Target::Proxy {
+                    route,
+                    base_url: &base_url,
+                },
+                Some(&record.token),
+                snapshot,
+            )
         }
-        AppType::Gemini => build_gateway_gemini_writes(provider, &url, &record.token, snapshot),
+        AppType::Gemini => {
+            let route = match provider {
+                Some(provider) => gemini_direct::projection(provider)?,
+                None => GeminiProjection::empty(),
+            };
+            let projection = GeminiProjection::proxy_contract(&route, &url, &record.token);
+            gemini_remote_writes(&projection, snapshot)
+        }
         _ => unreachable!("unsupported app type checked by caller"),
     }
 }
 
-/// Same projection as local proxy takeover, with the gateway token as the key.
-fn build_gateway_codex_writes(
-    state: &AppState,
-    provider: &Provider,
-    url: &str,
-    token: &str,
-    snapshot: &RemoteSnapshot,
-) -> Result<Vec<RemoteWrite>, AppError> {
-    use crate::codex_config::update_codex_toml_field;
-
-    let effective =
-        build_effective_settings_with_common_config(state.db.as_ref(), &AppType::Codex, provider)?;
-    let config_text = effective
-        .get("config")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let base_url = format!("{url}/v1");
-    let mut config_text =
-        update_codex_toml_field(config_text, "base_url", &base_url).map_err(AppError::Message)?;
-    config_text = update_codex_toml_field(&config_text, "wire_api", "responses")
-        .map_err(AppError::Message)?;
-    if let Some(model) = crate::proxy::providers::codex_provider_upstream_model(provider) {
-        config_text =
-            update_codex_toml_field(&config_text, "model", &model).map_err(AppError::Message)?;
-    }
-
-    let settings = json!({
-        "auth": { "OPENAI_API_KEY": token },
-        "config": config_text,
-    });
-    let mut gateway_provider = provider.clone();
-    gateway_provider.category = Some("custom".to_string());
-    build_remote_codex_writes(&gateway_provider, &settings, snapshot)
-}
-
-fn build_gateway_gemini_writes(
-    provider: Option<&Provider>,
-    url: &str,
-    token: &str,
-    snapshot: &RemoteSnapshot,
-) -> Result<Vec<RemoteWrite>, AppError> {
-    use crate::gemini_config::{parse_env_file, serialize_env_file};
-
-    let mut env = parse_env_file(snapshot.get(GEMINI_ENV_PATH).unwrap_or_default());
-    env.remove("GOOGLE_API_KEY");
-    env.insert("GOOGLE_GEMINI_BASE_URL".to_string(), url.to_string());
-    env.insert("GEMINI_API_KEY".to_string(), token.to_string());
-    if let Some(model) = provider
-        .and_then(|provider| provider.settings_config.get("env"))
-        .and_then(|env| env.get("GEMINI_MODEL"))
-        .and_then(Value::as_str)
-        .filter(|model| !model.trim().is_empty())
-    {
-        env.insert("GEMINI_MODEL".to_string(), model.to_string());
-    }
-
-    let mut settings =
-        parse_json_object_or_empty(snapshot.get(GEMINI_SETTINGS_PATH).unwrap_or_default());
-    set_gemini_selected_type(&mut settings, "gemini-api-key");
-
-    Ok(vec![
-        RemoteWrite {
-            path: GEMINI_ENV_PATH,
-            content: Some(serialize_env_file(&env)),
-        },
-        RemoteWrite {
-            path: GEMINI_SETTINGS_PATH,
-            content: Some(json_pretty(&settings)?),
-        },
-    ])
+fn gateway_placeholder_codex_provider(base_url: &str) -> Provider {
+    let config = format!(
+        "model_provider = \"custom\"\n\n[model_providers.custom]\nname = \"cc-switch\"\nbase_url = \"{base_url}\"\nwire_api = \"responses\"\n"
+    );
+    let mut provider = Provider::with_id(
+        "remote-gateway".to_string(),
+        "CC Switch".to_string(),
+        json!({ "auth": {}, "config": config }),
+        None,
+    );
+    provider.category = Some("custom".to_string());
+    provider
 }
 
 /// Points the remote CLI at the tunnel. Blocking (runs ssh).
@@ -736,11 +705,17 @@ fn push_gateway_config(
     provider: Option<&Provider>,
 ) -> Result<(Vec<String>, RemoteProviderState), AppError> {
     let snapshot = read_remote_snapshot(app, target)?;
-    let writes: Vec<RemoteWrite> = build_gateway_writes(state, app, record, provider, &snapshot)?
-        .into_iter()
-        .filter(|write| write.content.as_deref() != snapshot.get(write.path))
-        .filter(|write| write.content.is_some() || snapshot.get(write.path).is_some())
-        .collect();
+    let prev = if snapshot_uses_gateway(&state.db, &record.host_key, &snapshot) {
+        None
+    } else {
+        matched_remote_provider(state, app, &snapshot)?
+    };
+    let writes: Vec<RemoteWrite> =
+        build_gateway_writes(state, app, record, prev.as_ref(), provider, &snapshot)?
+            .into_iter()
+            .filter(|write| write.content.as_deref() != snapshot.get(write.path))
+            .filter(|write| write.content.is_some() || snapshot.get(write.path).is_some())
+            .collect();
     let (written, _removed) = if writes.is_empty() {
         (Vec::new(), Vec::new())
     } else {
@@ -1129,6 +1104,8 @@ mod tests {
 
     #[test]
     fn gemini_gateway_writes_replace_key_and_keep_other_env() {
+        use super::super::remote::{GEMINI_ENV_PATH, GEMINI_SETTINGS_PATH};
+
         let snapshot = RemoteSnapshot {
             files: vec![
                 (
@@ -1138,8 +1115,12 @@ mod tests {
                 (GEMINI_SETTINGS_PATH, None),
             ],
         };
-        let writes =
-            build_gateway_gemini_writes(None, "http://127.0.0.1:23456", "tok", &snapshot).unwrap();
+        let projection = GeminiProjection::proxy_contract(
+            &GeminiProjection::empty(),
+            "http://127.0.0.1:23456",
+            "tok",
+        );
+        let writes = gemini_remote_writes(&projection, &snapshot).unwrap();
         let env = writes[0].content.as_deref().unwrap();
         assert!(env.contains("GEMINI_API_KEY=tok"));
         assert!(env.contains("GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:23456"));

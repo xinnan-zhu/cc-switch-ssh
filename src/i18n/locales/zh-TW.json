@@ -2097,7 +2097,14 @@
       "localLoginOnly": "依賴本機官方登入，不能給遠端使用",
       "confirmDisableTitle": "改回直連？",
       "confirmDisableMessage": "會把「{{provider}}」直接寫入 {{host}} 的 {{app}} 設定並中斷通道（其他應用仍在使用時保留通道）。之後可在下方清單換成其他供應商。",
-      "confirmDisable": "改回直連"
+      "confirmDisable": "改回直連",
+      "indicatorTitle": "{{count}} 台伺服器正在使用本機閘道",
+      "indicatorHeading": "遠端閘道",
+      "proxyRunning": "本機閘道執行中",
+      "proxyNotRunning": "本機閘道未執行",
+      "manage": "開啟遠端管理",
+      "followLocalShort": "跟隨本地 · {{name}}",
+      "indicatorHint": "這些伺服器透過 SSH 通道使用本機閘道，需要本機保持在線。"
     }
   },
   "mcp": {

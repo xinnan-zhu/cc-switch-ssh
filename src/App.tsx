@@ -109,6 +109,8 @@ import AgentsDefaultsPanel from "@/components/openclaw/AgentsDefaultsPanel";
 import OpenClawHealthBanner from "@/components/openclaw/OpenClawHealthBanner";
 import HermesMemoryPanel from "@/components/hermes/HermesMemoryPanel";
 import { RemoteProviderPage } from "@/components/remote/RemoteProviderPage";
+import { RemoteGatewayIndicator } from "@/components/remote/RemoteGatewayIndicator";
+import type { SshConnectionTarget } from "@/lib/api/providers";
 import {
   APP_IDS,
   DEFAULT_VISIBLE_APPS,
@@ -185,6 +187,10 @@ function App() {
   const sharedFeatureApp: AppId =
     activeApp === "claude-desktop" ? "claude" : activeApp;
   const [currentView, setCurrentView] = useState<View>(getInitialView);
+  const [remoteFocus, setRemoteFocus] = useState<{
+    target: SshConnectionTarget;
+    nonce: number;
+  } | null>(null);
   const [skillsDiscoverySource, setSkillsDiscoverySource] =
     useState<SkillsPageSource>("repos");
   const [settingsDefaultTab, setSettingsDefaultTab] = useState("general");
@@ -1095,6 +1101,7 @@ function App() {
               providers={providers}
               currentProviderId={currentProviderId}
               isLoading={isLoading}
+              focusTarget={remoteFocus}
             />
           );
         case "mcp":
@@ -1395,6 +1402,13 @@ function App() {
                   onClick={() => {
                     setSettingsDefaultTab("about");
                     setCurrentView("settings");
+                  }}
+                />
+                <RemoteGatewayIndicator
+                  onManage={(host, app) => {
+                    setActiveApp(app);
+                    setRemoteFocus({ target: host.target, nonce: Date.now() });
+                    setCurrentView("remote");
                   }}
                 />
                 {isCurrentAppTakeoverActive && (

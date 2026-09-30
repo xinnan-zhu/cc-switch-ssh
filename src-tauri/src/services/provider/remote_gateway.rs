@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::process::Stdio;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -89,6 +90,33 @@ pub struct RemoteGatewayApplyResult {
     /// Set when the remote config was (re)written.
     pub remote_state: Option<RemoteProviderState>,
     pub written_files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteGatewayRoute {
+    pub app: String,
+    /// `None` follows the local current provider.
+    pub provider_id: Option<String>,
+    /// Name of the provider requests go to right now.
+    pub provider_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteGatewayHost {
+    pub host_key: String,
+    pub target: SshConnectionTarget,
+    pub remote_port: u16,
+    pub tunnel: TunnelStatus,
+    pub routes: Vec<RemoteGatewayRoute>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteGatewayOverview {
+    pub proxy_running: bool,
+    pub hosts: Vec<RemoteGatewayHost>,
 }
 
 // ---------------------------------------------------------------------------
@@ -233,6 +261,20 @@ fn host_has_enabled_routes(db: &Database, host_key: &str) -> Result<bool, AppErr
         |row| row.get::<_, bool>(0),
     )
     .map_err(db_err)
+}
+
+fn enabled_routes(db: &Database) -> Result<Vec<(String, String, Option<String>)>, AppError> {
+    let conn = crate::database::lock_conn!(db.conn);
+    let mut stmt = conn
+        .prepare(
+            "SELECT host_key, app_type, provider_id FROM remote_gateway_routes
+             WHERE enabled = 1 ORDER BY host_key, app_type",
+        )
+        .map_err(db_err)?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .map_err(db_err)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(db_err)
 }
 
 fn enabled_host_keys(db: &Database) -> Result<Vec<String>, AppError> {
@@ -893,6 +935,44 @@ impl RemoteGatewayService {
         let status = ensure_tunnel(state.db.clone(), state.proxy_service.clone(), &record).await?;
         wait_for_first_attempt(status).await;
         Self::state_for(state, &app, &host_key).await
+    }
+
+    /// Every host with gateway mode on, for the main-window indicator.
+    pub async fn overview(state: &AppState) -> Result<RemoteGatewayOverview, AppError> {
+        let mut hosts: Vec<RemoteGatewayHost> = Vec::new();
+        for (host_key, app, provider_id) in enabled_routes(&state.db)? {
+            if hosts.last().map(|host| &host.host_key) != Some(&host_key) {
+                let Some(record) = load_record(&state.db, &host_key)? else {
+                    continue;
+                };
+                hosts.push(RemoteGatewayHost {
+                    tunnel: tunnel_status(&host_key).await,
+                    host_key: host_key.clone(),
+                    target: record.target,
+                    remote_port: record.remote_port,
+                    routes: Vec::new(),
+                });
+            }
+            let provider_name = AppType::from_str(&app)
+                .ok()
+                .and_then(|app_type| {
+                    routed_provider(state, &app_type, provider_id.as_deref())
+                        .ok()
+                        .flatten()
+                })
+                .map(|provider| provider.name);
+            if let Some(host) = hosts.last_mut() {
+                host.routes.push(RemoteGatewayRoute {
+                    app,
+                    provider_id,
+                    provider_name,
+                });
+            }
+        }
+        Ok(RemoteGatewayOverview {
+            proxy_running: state.proxy_service.is_running().await,
+            hosts,
+        })
     }
 
     /// Brings up tunnels for every host with an enabled route (app launch).

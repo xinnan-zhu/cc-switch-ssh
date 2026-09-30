@@ -2096,7 +2096,14 @@
       "localLoginOnly": "依赖本机官方登录，不能给远端使用",
       "confirmDisableTitle": "改回直连？",
       "confirmDisableMessage": "会把「{{provider}}」直接写入 {{host}} 的 {{app}} 配置并断开隧道（其他应用仍在使用时保留隧道）。之后可在下方列表换成其他供应商。",
-      "confirmDisable": "改回直连"
+      "confirmDisable": "改回直连",
+      "indicatorTitle": "{{count}} 台服务器正在使用本机网关",
+      "indicatorHeading": "远端网关",
+      "proxyRunning": "本机网关运行中",
+      "proxyNotRunning": "本机网关未运行",
+      "manage": "打开远端管理",
+      "followLocalShort": "跟随本地 · {{name}}",
+      "indicatorHint": "这些服务器通过 SSH 隧道使用本机网关，需要本机保持在线。"
     }
   },
   "mcp": {

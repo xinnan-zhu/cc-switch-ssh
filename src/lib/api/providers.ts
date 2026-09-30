@@ -89,6 +89,24 @@ export interface RemoteGatewayState {
   proxyRunning: boolean;
 }
 
+export interface RemoteGatewayHost {
+  hostKey: string;
+  target: SshConnectionTarget;
+  remotePort: number;
+  tunnel: RemoteGatewayState["tunnel"];
+  routes: {
+    app: AppId;
+    /** null follows the local current provider */
+    providerId?: string | null;
+    providerName?: string | null;
+  }[];
+}
+
+export interface RemoteGatewayOverview {
+  proxyRunning: boolean;
+  hosts: RemoteGatewayHost[];
+}
+
 export interface RemoteGatewayApplyResult {
   state: RemoteGatewayState;
   remoteState?: RemoteProviderState | null;
@@ -219,6 +237,10 @@ export const providersApi = {
       app: appId,
       target,
     });
+  },
+
+  async getRemoteGatewayOverview(): Promise<RemoteGatewayOverview> {
+    return await invoke("get_remote_gateway_overview");
   },
 
   async getRemoteGatewayState(

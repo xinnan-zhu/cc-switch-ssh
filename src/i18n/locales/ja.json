@@ -2096,7 +2096,14 @@
       "localLoginOnly": "ローカルの公式ログインに依存するため、リモートでは使用できません",
       "confirmDisableTitle": "直接接続に戻しますか？",
       "confirmDisableMessage": "「{{provider}}」を {{host}} の {{app}} 設定に直接書き込み、トンネルを閉じます（他のアプリが使用中の場合は維持）。その後、下のリストから別のプロバイダーを選べます。",
-      "confirmDisable": "直接接続に戻す"
+      "confirmDisable": "直接接続に戻す",
+      "indicatorTitle": "{{count}} 台のサーバーがローカルゲートウェイを使用中",
+      "indicatorHeading": "リモートゲートウェイ",
+      "proxyRunning": "ローカルゲートウェイ実行中",
+      "proxyNotRunning": "ローカルゲートウェイ停止中",
+      "manage": "リモート管理を開く",
+      "followLocalShort": "ローカルに従う · {{name}}",
+      "indicatorHint": "これらのサーバーは SSH トンネル経由でローカルゲートウェイを使用しています。このマシンをオンラインに保ってください。"
     }
   },
   "mcp": {

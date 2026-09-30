@@ -41,12 +41,15 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { RemoteGatewayCard } from "./RemoteGatewayCard";
+import { REMOTE_GATEWAY_OVERVIEW_KEY } from "./RemoteGatewayIndicator";
 
 interface RemoteProviderPageProps {
   appId: AppId;
   providers: Record<string, Provider>;
   currentProviderId: string;
   isLoading?: boolean;
+  /** Selects and connects this host, e.g. when opened from the header. */
+  focusTarget?: { target: SshConnectionTarget; nonce: number } | null;
 }
 
 const SUPPORTED_REMOTE_APPS: AppId[] = ["claude", "codex", "gemini"];
@@ -156,6 +159,7 @@ export function RemoteProviderPage({
   providers,
   currentProviderId,
   isLoading = false,
+  focusTarget,
 }: RemoteProviderPageProps) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
@@ -193,6 +197,25 @@ export function RemoteProviderPage({
     setConnectedTarget(null);
     setConnectionVersion((value) => value + 1);
   }, [appId]);
+
+  const focusNonce = focusTarget?.nonce;
+  useEffect(() => {
+    const target = focusTarget?.target;
+    if (!target) return;
+    setConnectionMode(target.type);
+    if (target.type === "config") {
+      setSelectedHost(target.alias);
+    } else {
+      setManualHost(target.host);
+      setManualUser(target.user ?? "");
+      setManualPort(target.port ? String(target.port) : "");
+      setManualPassword("");
+    }
+    setConnectedTarget(target);
+    setConnectionVersion((value) => value + 1);
+    // Only a new nonce (a new click) should re-focus.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusNonce]);
 
   const manualPortNumber = useMemo(() => {
     const trimmed = manualPort.trim();
@@ -482,6 +505,9 @@ export function RemoteProviderPage({
       ["remoteGatewayState", appId, targetKey],
       result.state,
     );
+    void queryClient.invalidateQueries({
+      queryKey: REMOTE_GATEWAY_OVERVIEW_KEY,
+    });
     if (result.remoteState && targetKey === connectedTargetKey) {
       queryClient.setQueryData(
         ["remoteProviderState", appId, connectedTargetKey, connectionVersion],
@@ -584,6 +610,9 @@ export function RemoteProviderPage({
       await queryClient.invalidateQueries({
         queryKey: ["remoteGatewayState", appId, getTargetKey(target)],
       });
+      void queryClient.invalidateQueries({
+        queryKey: REMOTE_GATEWAY_OVERVIEW_KEY,
+      });
       toast.success(
         t("remote.gateway.disabled", {
           defaultValue: "已改回直连，远端使用 {{provider}}",
@@ -604,6 +633,9 @@ export function RemoteProviderPage({
         ["remoteGatewayState", appId, getTargetKey(target)],
         state,
       );
+      void queryClient.invalidateQueries({
+        queryKey: REMOTE_GATEWAY_OVERVIEW_KEY,
+      });
       invalidateProxyQueries();
     },
     onError: gatewayError,

@@ -8,9 +8,9 @@ use crate::error::AppError;
 use crate::provider::{ClaudeDesktopMode, Provider};
 use crate::services::{
     EndpointLatency, ProviderService, ProviderSortUpdate, RemoteApplyResult,
-    RemoteGatewayApplyResult, RemoteGatewayService, RemoteGatewayState, RemoteImportResult,
-    RemoteProviderService, RemoteProviderState, RemoteRestartResult, SpeedtestService,
-    SshConnectionTarget, SshHostEntry, SwitchResult,
+    RemoteGatewayApplyResult, RemoteGatewayOverview, RemoteGatewayService, RemoteGatewayState,
+    RemoteImportResult, RemoteProviderService, RemoteProviderState, RemoteRestartResult,
+    SpeedtestService, SshConnectionTarget, SshHostEntry, SwitchResult,
 };
 use crate::store::AppState;
 use std::str::FromStr;
@@ -217,6 +217,15 @@ pub async fn restart_remote_app_processes(
     })
     .await
     .map_err(|e| format!("重启远端进程失败: {e}"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_remote_gateway_overview(
+    state: State<'_, AppState>,
+) -> Result<RemoteGatewayOverview, String> {
+    RemoteGatewayService::overview(state.inner())
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command(rename_all = "camelCase")]

@@ -2096,7 +2096,14 @@
       "localLoginOnly": "Relies on a local official login and can't be used remotely",
       "confirmDisableTitle": "Switch back to direct mode?",
       "confirmDisableMessage": "Writes \"{{provider}}\" directly into the {{app}} config on {{host}} and closes the tunnel (kept while other apps still use it). You can pick another provider from the list afterwards.",
-      "confirmDisable": "Switch to direct"
+      "confirmDisable": "Switch to direct",
+      "indicatorTitle": "{{count}} server(s) using the local gateway",
+      "indicatorHeading": "Remote gateways",
+      "proxyRunning": "Local gateway running",
+      "proxyNotRunning": "Local gateway stopped",
+      "manage": "Open remote management",
+      "followLocalShort": "Follow local · {{name}}",
+      "indicatorHint": "These servers reach the local gateway through SSH tunnels; keep this machine online."
     }
   },
   "mcp": {

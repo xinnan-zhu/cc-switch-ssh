@@ -112,6 +112,17 @@ pub fn pinned_provider(
     Ok(provider)
 }
 
+/// Remote routes also keep the shared proxy alive when local apps use direct mode.
+pub(crate) fn has_enabled_routes(db: &Database) -> Result<bool, AppError> {
+    let conn = crate::database::lock_conn!(db.conn);
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM remote_gateway_routes WHERE enabled = 1)",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(|error| AppError::Database(error.to_string()))
+}
+
 /// Remote CLIs can't hand over a local ChatGPT / Claude subscription login.
 pub fn provider_usable_remotely(provider: &Provider) -> bool {
     !crate::proxy::providers::is_codex_official_provider(provider)
@@ -304,6 +315,164 @@ async fn serve_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn routed_state(provider: &Provider, pinned: bool) -> crate::proxy::server::ProxyState {
+        let db = std::sync::Arc::new(Database::memory().unwrap());
+        db.save_provider("codex", provider).unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO remote_gateway_routes VALUES ('remote-test-host', 'codex', 1, ?1)",
+                [pinned.then_some(provider.id.as_str())],
+            )
+            .unwrap();
+        }
+        crate::proxy::server::ProxyState::for_test(db)
+    }
+
+    #[tokio::test]
+    async fn remote_pinned_context_disables_failover_and_records_host_source() {
+        use crate::app_config::AppType;
+        use crate::proxy::handler_context::RequestContext;
+        let provider = Provider::with_id(
+            "remote-pinned".into(),
+            "Pinned".into(),
+            serde_json::json!({}),
+            None,
+        );
+        let state = routed_state(&provider, true);
+        let mut config = state.db.get_proxy_config_for_app("codex").await.unwrap();
+        config.auto_failover_enabled = true;
+        state.db.update_proxy_config_for_app(config).await.unwrap();
+        let ctx = REMOTE_ORIGIN
+            .scope(
+                RemoteOrigin {
+                    host_key: "remote-test-host".into(),
+                },
+                async {
+                    RequestContext::new(
+                        &state,
+                        &serde_json::json!({"model": "old-model"}),
+                        &HeaderMap::new(),
+                        AppType::Codex,
+                        "Codex",
+                        "codex",
+                        None,
+                    )
+                    .await
+                    .unwrap()
+                },
+            )
+            .await;
+        assert_eq!(ctx.provider.id, provider.id);
+        assert_eq!(ctx.current_provider_id, provider.id);
+        assert_eq!(ctx.get_providers().len(), 1);
+        assert!(!ctx.app_config.auto_failover_enabled);
+        assert_eq!(
+            session_source(Some(&ctx.session_id)),
+            Some("remote:remote-test-host".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_following_stack_preserves_model_and_refuses_local_login() {
+        use crate::app_config::AppType;
+        use crate::mode::stack::StackTarget;
+        use crate::proxy::handler_context::RequestContext;
+        let provider = Provider::with_id(
+            "stack-member".into(),
+            "Stack member".into(),
+            serde_json::json!({}),
+            None,
+        );
+        let state = routed_state(&provider, false);
+        for official in [false, true] {
+            let mut provider = provider.clone();
+            if official {
+                provider.category = Some("official".into());
+            }
+            let target = StackTarget {
+                provider,
+                upstream_model: "member-model".into(),
+                original_model: "ccs-member/member-model".into(),
+            };
+            let result = REMOTE_ORIGIN
+                .scope(
+                    RemoteOrigin {
+                        host_key: "remote-test-host".into(),
+                    },
+                    async {
+                        RequestContext::new(
+                            &state,
+                            &serde_json::json!({"model": "member-model"}),
+                            &HeaderMap::new(),
+                            AppType::Codex,
+                            "Codex",
+                            "codex",
+                            Some(target),
+                        )
+                        .await
+                    },
+                )
+                .await;
+            if official {
+                assert!(matches!(
+                    result,
+                    Err(crate::proxy::ProxyError::AuthError(_))
+                ));
+            } else {
+                let ctx = result.unwrap();
+                assert!(ctx.is_stack);
+                assert_eq!(ctx.provider.id, "stack-member");
+                assert_eq!(ctx.request_model, "ccs-member/member-model");
+                assert!(!ctx.app_config.auto_failover_enabled);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_pinned_host_cannot_bypass_route_with_stack_model() {
+        use tower::Service;
+        let provider = Provider::with_id(
+            "pinned".into(),
+            "Pinned".into(),
+            serde_json::json!({}),
+            None,
+        );
+        let state = routed_state(&provider, true);
+        let server = crate::proxy::server::ProxyServer::new(
+            crate::proxy::types::ProxyConfig::default(),
+            state.db,
+            None,
+        );
+        let request = http::Request::builder()
+            .method("POST")
+            .uri("/v1/responses")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"model":"ccs-other/other-model","input":[]}"#,
+            ))
+            .unwrap();
+        let mut router = server.router();
+        let response = REMOTE_ORIGIN
+            .scope(
+                RemoteOrigin {
+                    host_key: "remote-test-host".into(),
+                },
+                router.call(request),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("固定供应商"));
+    }
 
     #[test]
     fn extract_client_token_reads_bearer_api_key_and_query() {

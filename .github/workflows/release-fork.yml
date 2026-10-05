@@ -1,6 +1,6 @@
 name: Release (cc-switch-ssh)
 
-# Tags look like v3.20.4-ssh.1: upstream version + fork build number.
+# Tags look like v4.0.1-ssh.1: upstream version + fork build number.
 on:
   push:
     tags:
@@ -33,8 +33,18 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Read pinned Rust toolchain
+        id: rust-toolchain
+        shell: bash
+        run: |
+          channel=$(sed -nE 's/^channel *= *"([^"]+)".*/\1/p' rust-toolchain.toml)
+          test -n "$channel"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.rust-toolchain.outputs.channel }}
 
       - name: Add macOS targets
         if: runner.os == 'macOS'
@@ -88,7 +98,7 @@ jobs:
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
           if [[ ! "$TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)-ssh\.([0-9]+)$ ]]; then
-            echo "Tag must look like v3.20.4-ssh.1, got: $TAG" >&2
+            echo "Tag must look like v4.0.1-ssh.1, got: $TAG" >&2
             exit 1
           fi
           VERSION="${TAG#v}"

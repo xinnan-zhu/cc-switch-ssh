@@ -12,7 +12,7 @@ import {
   UploadCloud,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { toast } from "sonner";
+import { toast } from "@/lib/toast";
 import type { Provider } from "@/types";
 import type { AppId } from "@/lib/api";
 import {
@@ -879,7 +879,7 @@ export function RemoteProviderPage({
   }
 
   return (
-    <div className="px-6 pt-4 pb-10 space-y-4">
+    <div className="mx-auto w-full max-w-[1040px] space-y-4">
       <section className="rounded-lg border border-border bg-card p-4">
         <Tabs
           value={connectionMode}

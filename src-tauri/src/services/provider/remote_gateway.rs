@@ -636,7 +636,7 @@ fn build_gateway_writes(
             let route = provider
                 .map(|provider| ClaudeProjection::of(&provider.settings_config))
                 .unwrap_or_default();
-            let mut projection = proxy_projection(&route, &url, ProxyAuth::FollowRow);
+            let mut projection = proxy_projection(&route, &url, ProxyAuth::FollowRow, None);
             for value in projection.env.values_mut() {
                 if value.as_str() == Some(PROXY_TOKEN_PLACEHOLDER) {
                     *value = Value::String(record.token.clone());
@@ -665,6 +665,7 @@ fn build_gateway_writes(
                 codex_direct::Target::Proxy {
                     route,
                     base_url: &base_url,
+                    stack: &[],
                 },
                 Some(&record.token),
                 snapshot,

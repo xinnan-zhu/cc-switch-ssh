@@ -1754,7 +1754,11 @@ experimental_bearer_token = "sk-1"
                 "HTTPS_PROXY": "http://proxy:3128"
             },
             "permissions": { "allow": ["Bash(ls)"] },
-            "hooks": { "Stop": [] }
+            "hooks": { "Stop": [] },
+            "modelPicker": {
+                "replaceBuiltInOptions": true,
+                "options": [{ "model": "ccs-claude-old--old-model" }]
+            }
         });
         let snapshot = RemoteSnapshot {
             files: vec![(CLAUDE_SETTINGS_PATH, Some(remote.to_string()))],
@@ -1781,6 +1785,79 @@ experimental_bearer_token = "sk-1"
         assert_eq!(written["env"]["HTTPS_PROXY"], "http://proxy:3128");
         assert_eq!(written["permissions"], remote["permissions"]);
         assert_eq!(written["hooks"], remote["hooks"]);
+        assert!(written.get("modelPicker").is_none());
+    }
+
+    #[test]
+    fn remote_codex_catalog_replaces_foreign_pointer_and_keeps_login_and_route_id() {
+        let db = crate::database::Database::memory().unwrap();
+        let remote = r#"model_provider = "remote-route"
+model_catalog_json = "/opt/other-tool/models.json"
+
+[model_providers.remote-route]
+name = "old"
+base_url = "https://old.example.com/v1"
+
+[mcp_servers.tool]
+command = "tool"
+"#;
+        let login = json!({ "tokens": { "access_token": "remote-login" } }).to_string();
+        let snapshot = RemoteSnapshot {
+            files: vec![
+                (CODEX_CONFIG_PATH, Some(remote.to_string())),
+                (CODEX_AUTH_PATH, Some(login)),
+                (CODEX_CATALOG_PATH, None),
+            ],
+        };
+        let mut provider = Provider::with_id(
+            "new".to_string(),
+            "New".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "new-key" },
+                "config": "model_provider = \"custom\"\nmodel = \"gpt-5.5\"\n[model_providers.custom]\nbase_url = \"https://new.example.com/v1\"\n",
+                "modelCatalog": { "models": [{ "model": "gpt-5.5" }] }
+            }),
+            None,
+        );
+        for with_catalog in [true, false] {
+            if !with_catalog {
+                provider
+                    .settings_config
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("modelCatalog");
+            }
+            let writes = build_remote_codex_writes(
+                &db,
+                None,
+                codex_direct::Target::Direct(Some(&provider)),
+                None,
+                &snapshot,
+            )
+            .unwrap();
+            assert!(!writes.iter().any(|write| write.path == CODEX_AUTH_PATH));
+            let config = writes
+                .iter()
+                .find(|write| write.path == CODEX_CONFIG_PATH)
+                .unwrap();
+            let doc = config
+                .content
+                .as_deref()
+                .unwrap()
+                .parse::<DocumentMut>()
+                .unwrap();
+            assert_eq!(doc["model_provider"].as_str(), Some("remote-route"));
+            assert_eq!(doc["mcp_servers"]["tool"]["command"].as_str(), Some("tool"));
+            if with_catalog {
+                assert_eq!(
+                    doc["model_catalog_json"].as_str(),
+                    Some(crate::codex_config::CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME)
+                );
+                assert!(writes.iter().any(|write| write.path == CODEX_CATALOG_PATH));
+            } else {
+                assert!(doc.get("model_catalog_json").is_none());
+            }
+        }
     }
 
     #[test]

@@ -225,6 +225,9 @@ jobs:
     runs-on: ubuntu-22.04
     needs: release
     steps:
+      - name: Checkout release notes
+        uses: actions/checkout@v6
+
       - name: Download built release artifacts
         uses: actions/download-artifact@v8
         with:
@@ -265,12 +268,22 @@ jobs:
           cat release-assets/latest.json
           ls -la release-assets
 
+      - name: Select release notes
+        id: release-notes
+        shell: bash
+        run: |
+          notes="docs/release-notes/${GITHUB_REF_NAME}-zh.md"
+          if [[ -f "$notes" ]]; then
+            echo "path=$notes" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
           name: CC Switch SSH ${{ github.ref_name }}
           make_latest: true
+          body_path: ${{ steps.release-notes.outputs.path }}
           body: |
             ## CC Switch SSH ${{ github.ref_name }}
 

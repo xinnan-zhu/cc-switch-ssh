@@ -403,7 +403,7 @@ export function RemoteProviderPage({
       setConfirmRestart(false);
       toast.error(
         t("remote.restartFailed", {
-          defaultValue: "重启远端进程失败: {{error}}",
+          defaultValue: "停止远端进程失败: {{error}}",
           error: extractErrorMessage(error),
         }),
         { duration: 7000 },
@@ -441,7 +441,7 @@ export function RemoteProviderPage({
           duration: 10000,
           action: {
             label: t("remote.restartProcesses", {
-              defaultValue: "重启进程",
+              defaultValue: "停止进程",
             }),
             onClick: () => startRestart(target),
           },
@@ -539,7 +539,7 @@ export function RemoteProviderPage({
   };
 
   const restartAction = (target: SshConnectionTarget) => ({
-    label: t("remote.restartProcesses", { defaultValue: "重启进程" }),
+    label: t("remote.restartProcesses", { defaultValue: "停止进程" }),
     onClick: () => startRestart(target),
   });
 
@@ -1285,7 +1285,7 @@ export function RemoteProviderPage({
                 ) : (
                   <RotateCcw className="h-4 w-4" />
                 )}
-                {t("remote.restartProcesses", { defaultValue: "重启进程" })}
+                {t("remote.restartProcesses", { defaultValue: "停止进程" })}
               </Button>
             </div>
 
@@ -1444,7 +1444,7 @@ export function RemoteProviderPage({
       <ConfirmDialog
         isOpen={confirmRestart}
         title={t("remote.confirmRestartTitle", {
-          defaultValue: "重启远端 {{app}} 进程？",
+          defaultValue: "停止远端 {{app}} 进程？",
           app: t(`apps.${appId}`),
         })}
         message={t("remote.confirmRestartMessage", {
@@ -1454,7 +1454,7 @@ export function RemoteProviderPage({
           app: t(`apps.${appId}`),
         })}
         confirmText={t("remote.restartProcesses", {
-          defaultValue: "重启进程",
+          defaultValue: "停止进程",
         })}
         cancelText={t("common.cancel")}
         variant="destructive"

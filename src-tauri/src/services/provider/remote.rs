@@ -1561,16 +1561,24 @@ fn askpass_script_content() -> &'static str {
 #[cfg(unix)]
 fn configure_ssh_multiplexing(command: &mut Command) {
     let dir = crate::config::get_home_dir().join(".ssh");
+    configure_ssh_multiplexing_at(command, &dir);
+}
+
+#[cfg(unix)]
+fn configure_ssh_multiplexing_at(command: &mut Command, dir: &Path) {
     if !dir.is_dir() {
-        if fs::create_dir_all(&dir).is_err() {
+        if fs::create_dir_all(dir).is_err() {
             return;
         }
-        let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+        let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
     }
     // ssh splits option values on whitespace; skip rather than risk a bad path.
     let control_path = dir.join("cc-switch-%C");
     let control_path = control_path.to_string_lossy();
-    if control_path.chars().any(char::is_whitespace) {
+    // %C expands to 40 bytes, and OpenSSH appends a 17-byte temporary suffix.
+    // macOS sun_path holds 104 bytes including its terminator.
+    if control_path.chars().any(char::is_whitespace) || control_path.len() - 2 + 40 + 17 >= 104 {
+        command.args(["-o", "ControlMaster=no", "-o", "ControlPath=none"]);
         return;
     }
     command.args([
@@ -2372,6 +2380,20 @@ Host "quoted"
         let output = format!("{REMOTE_FILE_HEADER}10\nshort");
         assert!(parse_read_files_output(output.as_bytes(), 1).is_err());
         assert!(parse_read_files_output(b"", 1).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn long_ssh_config_directory_disables_multiplexing() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("long-config-directory".repeat(4));
+        let mut command = Command::new("ssh");
+        configure_ssh_multiplexing_at(&mut command, &dir);
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_str().unwrap())
+            .collect();
+        assert_eq!(args, ["-o", "ControlMaster=no", "-o", "ControlPath=none"]);
     }
 
     #[test]

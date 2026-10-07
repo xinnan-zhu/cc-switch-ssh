@@ -1,4 +1,5 @@
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { parse as parseToml } from "smol-toml";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
@@ -52,7 +53,12 @@ interface RemoteProviderPageProps {
   focusTarget?: { target: SshConnectionTarget; nonce: number } | null;
 }
 
-const SUPPORTED_REMOTE_APPS: AppId[] = ["claude", "codex", "gemini"];
+const SUPPORTED_REMOTE_APPS: AppId[] = [
+  "claude",
+  "codex",
+  "gemini",
+  "grokbuild",
+];
 const SECRET_KEY_PATTERN =
   /(api[_-]?key|token|secret|password|authorization|credential|auth)/i;
 
@@ -132,7 +138,7 @@ const getProviderSummary = (provider: Provider, appId: AppId) => {
     );
   }
 
-  if (appId === "codex") {
+  if (appId === "codex" || appId === "grokbuild") {
     const configText = typeof config.config === "string" ? config.config : "";
     const baseUrl = configText.match(/base_url\s*=\s*"([^"]+)"/)?.[1];
     return baseUrl || config.auth?.OPENAI_API_BASE || provider.notes || "";
@@ -310,6 +316,22 @@ export function RemoteProviderPage({
   const previewText = useMemo(() => {
     const config = remoteQuery.data?.provider?.settingsConfig;
     if (!config) return "";
+    if (typeof config.config === "string") {
+      try {
+        return JSON.stringify(
+          maskSecrets({ ...config, config: parseToml(config.config) }),
+          null,
+          2,
+        );
+      } catch {
+        // Never show raw, potentially credential-bearing TOML after a parse error.
+        return JSON.stringify(
+          maskSecrets({ ...config, config: "********" }),
+          null,
+          2,
+        );
+      }
+    }
     return JSON.stringify(maskSecrets(config), null, 2);
   }, [remoteQuery.data?.provider?.settingsConfig]);
   const remoteWarnings = remoteQuery.data?.warnings ?? [];
@@ -871,7 +893,7 @@ export function RemoteProviderPage({
       <div className="px-6 pt-4">
         <div className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
           {t("remote.unsupported", {
-            defaultValue: "远端配置暂时只支持 Claude、Codex 和 Gemini。",
+            defaultValue: "远端配置支持 Claude、Codex、Gemini 和 Grok Build。",
           })}
         </div>
       </div>

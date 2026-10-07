@@ -15,6 +15,7 @@ import {
   setCurrentProviderId,
   setLiveProviderIds,
   setProviders,
+  setSettings,
 } from "../msw/state";
 import { emitTauriEvent } from "../msw/tauriMocks";
 import { server } from "../msw/server";
@@ -340,25 +341,30 @@ describe("App integration with MSW", () => {
     expect(screen.queryByTestId("add-provider-dialog")).not.toBeInTheDocument();
   }, 10_000);
 
-  it("opens SSH management in the new shell and leaves it for unsupported apps", async () => {
-    const { default: App } = await import("@/App");
-    renderApp(App);
-    await screen.findByTestId("provider-list");
-
-    fireEvent.click(screen.getByRole("button", { name: "remote.manage" }));
-    expect(
-      await screen.findByText("没有在 ~/.ssh/config 中找到可用 Host。"),
-    ).toBeInTheDocument();
-    expect(localStorage.getItem("cc-switch-last-view")).toBe("remote");
-    expect(screen.queryByTestId("provider-list")).not.toBeInTheDocument();
-
-    fireEvent.click(sidebarApp("OpenClaw"));
-    await screen.findByTestId("provider-list");
-    expect(
-      screen.queryByRole("button", { name: "remote.manage" }),
-    ).not.toBeInTheDocument();
-    expect(localStorage.getItem("cc-switch-last-view")).toBe("providers");
-  });
+  it.each(["Claude Code", "Codex", "Gemini CLI", "Grok Build"])(
+    "opens SSH management for %s and leaves it for unsupported apps",
+    async (appName) => {
+      setSettings({ firstRunNoticeConfirmed: true });
+      const { default: App } = await import("@/App");
+      renderApp(App);
+      await screen.findByTestId("provider-list");
+      fireEvent.click(sidebarApp(appName));
+      fireEvent.click(
+        await screen.findByRole("button", { name: "remote.manage" }),
+      );
+      expect(
+        await screen.findByText("没有在 ~/.ssh/config 中找到可用 Host。"),
+      ).toBeInTheDocument();
+      expect(localStorage.getItem("cc-switch-last-view")).toBe("remote");
+      expect(screen.queryByTestId("provider-list")).not.toBeInTheDocument();
+      fireEvent.click(sidebarApp("OpenClaw"));
+      await screen.findByTestId("provider-list");
+      expect(
+        screen.queryByRole("button", { name: "remote.manage" }),
+      ).not.toBeInTheDocument();
+      expect(localStorage.getItem("cc-switch-last-view")).toBe("providers");
+    },
+  );
 
   it("asks before leaving an editor page with unsaved changes", async () => {
     const { default: App } = await import("@/App");

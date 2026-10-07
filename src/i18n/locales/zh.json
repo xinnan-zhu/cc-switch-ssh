@@ -2538,7 +2538,7 @@
     "applyFailed": "远端切换失败: {{error}}",
     "importSuccess": "已同步远端配置到本地",
     "importFailed": "同步远端配置失败: {{error}}",
-    "unsupported": "远端配置暂时只支持 Claude、Codex 和 Gemini。",
+    "unsupported": "远端配置支持 Claude、Codex、Gemini 和 Grok Build。",
     "configHostTab": "SSH Host",
     "manualHostTab": "用户名/IP",
     "hostLabel": "SSH Host",

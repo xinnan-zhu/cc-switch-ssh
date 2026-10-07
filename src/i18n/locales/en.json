@@ -2538,7 +2538,7 @@
     "applyFailed": "Remote switch failed: {{error}}",
     "importSuccess": "Remote config synced locally",
     "importFailed": "Failed to sync remote config: {{error}}",
-    "unsupported": "Remote config currently supports Claude, Codex, and Gemini only.",
+    "unsupported": "Remote configuration supports Claude, Codex, Gemini and Grok Build.",
     "configHostTab": "SSH Host",
     "manualHostTab": "User/IP",
     "hostLabel": "SSH Host",

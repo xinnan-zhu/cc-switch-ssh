@@ -96,7 +96,12 @@ export function appPageBelongsTo(page: AppPage, app: AppId): boolean {
     case "providers":
       return true;
     case "remote":
-      return app === "claude" || app === "codex" || app === "gemini";
+      return (
+        app === "claude" ||
+        app === "codex" ||
+        app === "gemini" ||
+        app === "grokbuild"
+      );
     case "workspace":
     case "openclawConfig":
       return app === "openclaw";

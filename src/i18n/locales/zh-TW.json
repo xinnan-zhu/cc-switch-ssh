@@ -2539,7 +2539,7 @@
     "applyFailed": "遠端切換失敗: {{error}}",
     "importSuccess": "已同步遠端設定到本機",
     "importFailed": "同步遠端設定失敗: {{error}}",
-    "unsupported": "遠端設定暫時只支援 Claude、Codex 和 Gemini。",
+    "unsupported": "遠端設定支援 Claude、Codex、Gemini 和 Grok Build。",
     "configHostTab": "SSH Host",
     "manualHostTab": "使用者名稱/IP",
     "hostLabel": "SSH Host",

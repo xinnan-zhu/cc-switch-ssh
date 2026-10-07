@@ -1359,7 +1359,7 @@ impl RequestForwarder {
         // Grok Build exposes a stable client-side model profile in config.toml.
         // Route requests to the provider's real upstream model before applying
         // the optional Responses -> Chat/Anthropic bridge.
-        if matches!(app_type, AppType::GrokBuild) {
+        if matches!(app_type, AppType::GrokBuild) && !self.keeps_resolved_model() {
             super::providers::apply_codex_upstream_model(provider, &mut mapped_body);
         }
 
@@ -6244,6 +6244,36 @@ mod tests {
             )
             .await;
             assert_eq!(seen.body["model"], "row-model");
+        }
+
+        #[tokio::test]
+        async fn grok_gateway_preserves_a_resolved_stack_model() {
+            let upstream = upstream().await;
+            let provider = Provider::with_id(
+                "grok".into(),
+                "Grok".into(),
+                json!({"config": format!(
+                    "[models]\ndefault = \"custom\"\n[model.custom]\nmodel = \"row-model\"\nname = \"Grok\"\nbase_url = \"{}/v1\"\napi_key = \"test-key\"\napi_backend = \"responses\"\ncontext_window = 500000\n", upstream.base_url
+                )}),
+                None,
+            );
+            for (stack, expected) in [(false, "row-model"), (true, "stack-model")] {
+                forwarder(stack)
+                    .forward_with_retry(
+                        &AppType::GrokBuild,
+                        http::Method::POST,
+                        "/responses",
+                        body("stack-model", json!([])),
+                        HeaderMap::new(),
+                        Extensions::new(),
+                        vec![provider.clone()],
+                    )
+                    .await
+                    .map_err(|error| error.error)
+                    .expect("forward Grok request");
+                let seen = upstream.seen.lock().await.pop().unwrap();
+                assert_eq!(seen.body["model"], expected);
+            }
         }
 
         #[tokio::test]

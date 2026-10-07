@@ -23,17 +23,20 @@ use super::codex_direct;
 use crate::codex_config::codex_auth_has_credential_login_material;
 use crate::live::patch::toml::{TomlDocPatch, TomlSteps};
 use crate::live::patch::{LivePatch, LiveWriteError};
+use crate::live::project::claude::PROXY_TOKEN_PLACEHOLDER;
 use crate::live::project::claude::{direct_patch as claude_direct_patch, ClaudeProjection};
 use crate::live::project::codex::{
     requires_openai_auth, RouteAuth, RouteWrite, OFFICIAL_PROXY_ROUTE_ID, ROUTE_ID,
 };
 use crate::live::project::gemini::GeminiProjection;
+use crate::live::project::grok::{GrokConfigPatch, GrokProjection};
 
 pub(super) const CLAUDE_SETTINGS_PATH: &str = "$HOME/.claude/settings.json";
 pub(super) const CODEX_AUTH_PATH: &str = "$HOME/.codex/auth.json";
 pub(super) const CODEX_CONFIG_PATH: &str = "$HOME/.codex/config.toml";
 pub(super) const GEMINI_ENV_PATH: &str = "$HOME/.gemini/.env";
 pub(super) const GEMINI_SETTINGS_PATH: &str = "$HOME/.gemini/settings.json";
+pub(super) const GROK_CONFIG_PATH: &str = "$HOME/.grok/config.toml";
 /// Written next to config.toml when the provider needs a model catalog; not
 /// part of the snapshot.
 const CODEX_CATALOG_PATH: &str = "$HOME/.codex/cc-switch-model-catalog.json";
@@ -323,7 +326,8 @@ impl RemoteProviderService {
             settings_config,
             None,
         );
-        provider.category = Some("custom".to_string());
+        provider.category =
+            Some(remote_provider_category(&app_type, &provider.settings_config).to_string());
         provider.created_at = Some(chrono::Utc::now().timestamp_millis());
         provider.notes = Some(format!(
             "Downloaded from SSH host {host_alias} for {}",
@@ -387,6 +391,8 @@ targets=$(ps -u "$(id -u)" -o pid= -o comm= -o args= 2>/dev/null | awk -v self="
     hit = (comm == "claude") || (wrapper && args ~ /(@anthropic-ai\/claude-code|claude-code\/cli|\/claude( |$))/)
   } else if (app == "gemini") {
     hit = (comm == "gemini") || (wrapper && args ~ /(gemini-cli|\/gemini( |$))/)
+  } else if (app == "grokbuild") {
+    hit = (comm == "grok") || (comm ~ /^grok-(linux|darwin|windows)/)
   }
   if (hit) printf "%s\t%s\n", pid, args
 }')
@@ -455,7 +461,8 @@ pub(super) fn remote_state_from_snapshot(
             settings_config,
             None,
         );
-        provider.category = Some("custom".to_string());
+        provider.category =
+            Some(remote_provider_category(app_type, &provider.settings_config).to_string());
         provider.notes = Some(format!(
             "Imported preview from SSH host {host_alias} for {}",
             app_type.as_str()
@@ -517,12 +524,15 @@ fn remote_overwrite_block_message(app_type: &AppType, host_alias: &str) -> Strin
 }
 
 pub(super) fn ensure_remote_supported(app_type: &AppType) -> Result<(), AppError> {
-    if matches!(app_type, AppType::Claude | AppType::Codex | AppType::Gemini) {
+    if matches!(
+        app_type,
+        AppType::Claude | AppType::Codex | AppType::Gemini | AppType::GrokBuild
+    ) {
         return Ok(());
     }
 
     Err(AppError::Message(format!(
-        "远端配置暂时只支持 Claude、Codex 和 Gemini，当前应用为 {}",
+        "远端配置暂时只支持 Claude、Codex、Gemini 和 Grok Build，当前应用为 {}",
         app_type.as_str()
     )))
 }
@@ -910,6 +920,12 @@ fn build_remote_writes(
         AppType::Gemini => {
             gemini_remote_writes(&super::gemini_direct::projection(provider)?, snapshot)
         }
+        AppType::GrokBuild => Ok(vec![grok_remote_write(
+            state.db.as_ref(),
+            prev,
+            &super::grok_direct::projection(provider)?,
+            snapshot,
+        )?]),
         _ => unreachable!("unsupported app type checked by caller"),
     }
 }
@@ -946,6 +962,55 @@ pub(super) fn gemini_remote_writes(
         patch_remote_file(&projection.env_patch(), GEMINI_ENV_PATH, snapshot)?,
         patch_remote_file(&projection.settings_patch(), GEMINI_SETTINGS_PATH, snapshot)?,
     ])
+}
+
+/// Retire only a matched provider's table or tables carrying this machine's
+/// gateway token. Unknown host models and remote login files remain untouched.
+pub(super) fn grok_remote_write(
+    db: &crate::database::Database,
+    prev: Option<&Provider>,
+    target: &GrokProjection,
+    snapshot: &RemoteSnapshot,
+) -> Result<RemoteWrite, AppError> {
+    let mut retired = prev
+        .map(super::grok_direct::projection)
+        .transpose()?
+        .map(|projection| projection.written_tables())
+        .unwrap_or_default();
+    let tokens: HashSet<String> = {
+        let conn = crate::database::lock_conn!(db.conn);
+        let mut stmt = conn.prepare("SELECT token FROM remote_gateways")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<Result<_, _>>()?
+    };
+    if let Some(content) = snapshot.get(GROK_CONFIG_PATH) {
+        if let Ok(doc) = content.parse::<DocumentMut>() {
+            if let Some(models) = doc.get("model").and_then(Item::as_table_like) {
+                retired.extend(models.iter().filter_map(|(name, table)| {
+                    let key = table.get("api_key").and_then(Item::as_str)?;
+                    tokens.contains(key).then(|| name.to_string())
+                }));
+            }
+        }
+    }
+    patch_remote_file(
+        &GrokConfigPatch::direct(target, retired, PROXY_TOKEN_PLACEHOLDER),
+        GROK_CONFIG_PATH,
+        snapshot,
+    )
+}
+
+fn remote_provider_category(app: &AppType, settings: &Value) -> &'static str {
+    if matches!(app, AppType::GrokBuild)
+        && settings
+            .get("config")
+            .and_then(Value::as_str)
+            .is_some_and(crate::grok_config::is_official_live_config)
+    {
+        "official"
+    } else {
+        "custom"
+    }
 }
 
 /// Runs the local Codex write plan against the remote files. The remote has
@@ -1090,6 +1155,7 @@ pub(super) fn remote_config_paths(app_type: &AppType) -> &'static [&'static str]
         AppType::Claude => &[CLAUDE_SETTINGS_PATH],
         AppType::Codex => &[CODEX_AUTH_PATH, CODEX_CONFIG_PATH],
         AppType::Gemini => &[GEMINI_ENV_PATH, GEMINI_SETTINGS_PATH],
+        AppType::GrokBuild => &[GROK_CONFIG_PATH],
         _ => &[],
     }
 }
@@ -1219,6 +1285,21 @@ fn remote_settings_from_snapshot(
     snapshot: &RemoteSnapshot,
 ) -> Result<RemoteSettingsRead, AppError> {
     match app_type {
+        AppType::GrokBuild => {
+            let mut read = RemoteSettingsRead::default();
+            let Some(content) = snapshot.get(GROK_CONFIG_PATH) else {
+                read.warnings
+                    .push("远端未找到 Grok Build config.toml".to_string());
+                return Ok(read);
+            };
+            if let Err(error) = crate::grok_config::validate_config_toml_syntax(content) {
+                read.invalid_files.push("~/.grok/config.toml".to_string());
+                read.warnings.push(error.to_string());
+            } else {
+                read.settings_config = Some(json!({ "config": content }));
+            }
+            Ok(read)
+        }
         AppType::Claude => {
             let Some(content) = snapshot.get(CLAUDE_SETTINGS_PATH) else {
                 return Ok(RemoteSettingsRead {
@@ -1868,6 +1949,158 @@ command = "tool"
             files: vec![(CLAUDE_SETTINGS_PATH, Some("{\"env\": {}}}".to_string()))],
         };
         assert!(claude_remote_write(None, &ClaudeProjection::default(), &snapshot).is_err());
+    }
+
+    fn grok_row(name: &str, key_field: &str) -> Provider {
+        Provider::with_id(
+            name.into(),
+            name.into(),
+            json!({"config": format!(
+                "[models]\ndefault = \"{name}\"\n[model.{name}]\nmodel = \"{name}-model\"\nname = \"{name}\"\nbase_url = \"https://{name}.example/v1\"\n{key_field}\napi_backend = \"responses\"\ncontext_window = 500000\n"
+            )}),
+            None,
+        )
+    }
+
+    #[test]
+    fn grok_remote_switch_preserves_host_models_and_settings() {
+        let db = crate::database::Database::memory().unwrap();
+        let old = grok_row("old", "api_key = \"old-key\"");
+        let new = grok_row("new", "env_key = \"REMOTE_KEY\"");
+        let remote = format!("# host\n{}\n[model.mine]\nmodel = \"my-model\"\n[mcp_servers.tool]\ncommand = \"host-tool\"\n[ui]\ntheme = \"dark\"\n", old.settings_config["config"].as_str().unwrap());
+        let snapshot = RemoteSnapshot {
+            files: vec![(GROK_CONFIG_PATH, Some(remote))],
+        };
+        let projection = super::super::grok_direct::projection(&new).unwrap();
+        for known in [false, true] {
+            let write =
+                grok_remote_write(&db, known.then_some(&old), &projection, &snapshot).unwrap();
+            let content = write.content.unwrap();
+            let doc = content.parse::<DocumentMut>().unwrap();
+            assert_eq!(doc["models"]["default"].as_str(), Some("new"));
+            assert_eq!(doc["model"]["new"]["env_key"].as_str(), Some("REMOTE_KEY"));
+            assert_eq!(doc["model"].get("old").is_none(), known);
+            assert_eq!(doc["model"]["mine"]["model"].as_str(), Some("my-model"));
+            assert_eq!(
+                doc["mcp_servers"]["tool"]["command"].as_str(),
+                Some("host-tool")
+            );
+            assert_eq!(doc["ui"]["theme"].as_str(), Some("dark"));
+            assert!(content.starts_with("# host"));
+        }
+    }
+
+    #[test]
+    fn grok_remote_official_switch_removes_gateway_table_without_touching_host_login() {
+        let db = crate::database::Database::memory().unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO remote_gateways VALUES ('grok-host', '{}', 23456, 'gateway-key', 1);",
+            )
+            .unwrap();
+        let gateway = grok_row("gateway", "api_key = \"gateway-key\"");
+        let remote = format!(
+            "{}\n[model.mine]\nmodel = \"my-model\"\n[mcp_servers.tool]\ncommand = \"host-tool\"\n",
+            gateway.settings_config["config"].as_str().unwrap()
+        );
+        let snapshot = RemoteSnapshot {
+            files: vec![(GROK_CONFIG_PATH, Some(remote))],
+        };
+        let official = GrokProjection::of(&json!({"config": ""}), true).unwrap();
+        let write = grok_remote_write(&db, None, &official, &snapshot).unwrap();
+        assert_eq!(write.path, GROK_CONFIG_PATH);
+        assert_eq!(
+            remote_config_paths(&AppType::GrokBuild),
+            &[GROK_CONFIG_PATH]
+        );
+        let doc = write.content.unwrap().parse::<DocumentMut>().unwrap();
+        assert!(doc.get("models").is_none());
+        assert!(doc["model"].get("gateway").is_none());
+        assert_eq!(doc["model"]["mine"]["model"].as_str(), Some("my-model"));
+        assert_eq!(
+            doc["mcp_servers"]["tool"]["command"].as_str(),
+            Some("host-tool")
+        );
+    }
+
+    #[test]
+    fn grok_remote_read_distinguishes_missing_broken_and_official_config() {
+        for (content, expected) in [
+            (None, "missing"),
+            (Some("[broken"), "broken"),
+            (
+                Some("# official\n[mcp_servers.tool]\ncommand = \"tool\"\n"),
+                "official",
+            ),
+            (Some(""), "official"),
+        ] {
+            let snapshot = RemoteSnapshot {
+                files: vec![(GROK_CONFIG_PATH, content.map(str::to_string))],
+            };
+            let read = remote_settings_from_snapshot(&AppType::GrokBuild, &snapshot).unwrap();
+            match expected {
+                "missing" => {
+                    assert!(read.settings_config.is_none());
+                    assert!(!read.warnings.is_empty());
+                }
+                "broken" => {
+                    assert!(read.settings_config.is_none());
+                    assert_eq!(read.invalid_files, ["~/.grok/config.toml"]);
+                }
+                _ => {
+                    assert_eq!(
+                        remote_provider_category(
+                            &AppType::GrokBuild,
+                            &read.settings_config.unwrap()
+                        ),
+                        "official"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn grok_remote_write_refuses_broken_toml() {
+        let db = crate::database::Database::memory().unwrap();
+        let new = grok_row("new", "api_key = \"new-key\"");
+        let snapshot = RemoteSnapshot {
+            files: vec![(GROK_CONFIG_PATH, Some("[broken".into()))],
+        };
+        assert!(grok_remote_write(
+            &db,
+            None,
+            &super::super::grok_direct::projection(&new).unwrap(),
+            &snapshot
+        )
+        .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn grok_process_filter_selects_cli_binaries_and_skips_other_programs() {
+        let home = tempfile::tempdir().unwrap();
+        let rows = "1 grok grok --resume test\n2 grok-linux-arm64 /home/u/.grok/downloads/grok-linux-arm64\n3 grok-server grok-server\n4 node node server-main.js\n5 grok grok extensionHost\n6 claude claude\n";
+        // Execute only process selection, never the signal-sending part.
+        let selection = REMOTE_STOP_APP_PROCESSES_SCRIPT
+            .split("[ -z \"$targets\" ]")
+            .next()
+            .unwrap();
+        let script = format!(
+            "ps() {{ printf '%s' {}; }}\nset -- grokbuild\n{selection}\nprintf '%s' \"$targets\"\n",
+            shell_single_quote(rows)
+        );
+        let output = String::from_utf8(run_local_sh(home.path(), &script)).unwrap();
+        let (selected, _) = parse_stop_processes_output(&output);
+        assert_eq!(
+            selected
+                .iter()
+                .map(|process| process.pid)
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
     }
 
     #[test]

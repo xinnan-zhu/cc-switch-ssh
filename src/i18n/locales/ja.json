@@ -2538,7 +2538,7 @@
     "applyFailed": "リモート切り替えに失敗しました: {{error}}",
     "importSuccess": "リモート設定をローカルへ同期しました",
     "importFailed": "リモート設定の同期に失敗しました: {{error}}",
-    "unsupported": "リモート設定は現在 Claude、Codex、Gemini のみ対応しています。",
+    "unsupported": "リモート設定は Claude、Codex、Gemini、Grok Build に対応しています。",
     "configHostTab": "SSH Host",
     "manualHostTab": "ユーザー/IP",
     "hostLabel": "SSH Host",

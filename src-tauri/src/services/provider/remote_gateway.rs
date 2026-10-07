@@ -19,11 +19,11 @@ use tokio::sync::{watch, Mutex};
 
 use super::remote::{
     apply_remote_writes, build_remote_codex_writes, claude_remote_write, ensure_remote_supported,
-    gemini_remote_writes, matched_remote_provider, read_remote_snapshot,
+    gemini_remote_writes, grok_remote_write, matched_remote_provider, read_remote_snapshot,
     remote_state_from_snapshot, resolve_ssh_target, InFlightGuard, RemoteSnapshot, RemoteWrite,
     ResolvedSshTarget,
 };
-use super::{codex_direct, gemini_direct, RemoteProviderState, SshConnectionTarget};
+use super::{codex_direct, gemini_direct, grok_direct, RemoteProviderState, SshConnectionTarget};
 use crate::app_config::AppType;
 use crate::database::Database;
 use crate::error::AppError;
@@ -31,6 +31,7 @@ use crate::live::project::claude::{
     proxy_projection, ClaudeProjection, ProxyAuth, PROXY_TOKEN_PLACEHOLDER,
 };
 use crate::live::project::gemini::GeminiProjection;
+use crate::live::project::grok::GrokProjection;
 use crate::provider::Provider;
 use crate::proxy::remote_gateway::{provider_usable_remotely, RemoteGatewayListener, RouterSource};
 use crate::services::ProxyService;
@@ -632,6 +633,25 @@ fn build_gateway_writes(
 ) -> Result<Vec<RemoteWrite>, AppError> {
     let url = gateway_url(record.remote_port);
     match app {
+        AppType::GrokBuild => {
+            let provider = provider.ok_or_else(|| {
+                AppError::Message(
+                    "本机 Grok Build 没有当前供应商，请先选择一个第三方供应商".to_string(),
+                )
+            })?;
+            let route = grok_direct::projection(provider)?;
+            let projection = GrokProjection::proxy_contract(
+                &route,
+                &format!("{url}/grokbuild/v1"),
+                &record.token,
+            )?;
+            Ok(vec![grok_remote_write(
+                state.db.as_ref(),
+                prev,
+                &projection,
+                snapshot,
+            )?])
+        }
         AppType::Claude => {
             let route = provider
                 .map(|provider| ClaudeProjection::of(&provider.settings_config))
@@ -1132,5 +1152,80 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("gemini-api-key"));
+    }
+
+    #[test]
+    fn grok_gateway_uses_its_app_route_and_keeps_host_settings() {
+        use super::super::remote::GROK_CONFIG_PATH;
+        let state = AppState::new(Arc::new(Database::memory().unwrap()));
+        let target = SshConnectionTarget {
+            target_type: Some("manual".into()),
+            alias: None,
+            host: Some("test.example".into()),
+            user: None,
+            port: None,
+            password: None,
+        };
+        let record = ensure_record(&state.db, "test-host", &target, Some(23456)).unwrap();
+        let config = "[models]\ndefault = \"custom\"\n[model.custom]\nmodel = \"grok-4.5\"\nname = \"Custom\"\nbase_url = \"https://example.com/v1\"\nenv_key = \"REMOTE_KEY\"\napi_backend = \"responses\"\ncontext_window = 500000\n";
+        let mut provider = Provider::with_id(
+            "custom".into(),
+            "Custom".into(),
+            json!({"config": config}),
+            None,
+        );
+        let snapshot = RemoteSnapshot {
+            files: vec![(
+                GROK_CONFIG_PATH,
+                Some("[mcp_servers.tool]\ncommand = \"host-tool\"\n".into()),
+            )],
+        };
+        let writes = build_gateway_writes(
+            &state,
+            &AppType::GrokBuild,
+            &record,
+            None,
+            Some(&provider),
+            &snapshot,
+        )
+        .unwrap();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].path, GROK_CONFIG_PATH);
+        let doc = writes[0]
+            .content
+            .as_deref()
+            .unwrap()
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert_eq!(
+            doc["model"]["custom"]["base_url"].as_str(),
+            Some("http://127.0.0.1:23456/grokbuild/v1")
+        );
+        assert_eq!(
+            doc["model"]["custom"]["api_key"].as_str(),
+            Some(record.token.as_str())
+        );
+        assert_eq!(
+            doc["model"]["custom"]["env_key"].as_str(),
+            Some("REMOTE_KEY")
+        );
+        assert_eq!(
+            doc["mcp_servers"]["tool"]["command"].as_str(),
+            Some("host-tool")
+        );
+        provider.category = Some("official".into());
+        assert!(build_gateway_writes(
+            &state,
+            &AppType::GrokBuild,
+            &record,
+            None,
+            Some(&provider),
+            &snapshot
+        )
+        .is_err());
+        assert!(
+            build_gateway_writes(&state, &AppType::GrokBuild, &record, None, None, &snapshot)
+                .is_err()
+        );
     }
 }

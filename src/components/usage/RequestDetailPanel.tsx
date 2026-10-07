@@ -30,6 +30,7 @@ import {
   parseFiniteNumber,
 } from "./format";
 import { appDisplayName } from "./RequestLogTable";
+import { getUsageProviderLabel } from "./providerLabel";
 
 interface RequestDetailPanelProps {
   /** 要看的请求；null 时抽屉关闭 */
@@ -114,7 +115,7 @@ function useDetailSections(request: RequestLog) {
     {
       key: "provider",
       label: t("usage.provider"),
-      value: request.providerName || t("usage.unknownProvider"),
+      value: getUsageProviderLabel(request.providerName, t).shortLabel,
     },
     {
       key: "providerId",
@@ -357,7 +358,7 @@ export function RequestDetailPanel({
     ? [
         new Date(request.createdAt * 1000).toLocaleString(),
         appDisplayName(request.appType),
-        request.providerName || t("usage.unknownProvider"),
+        getUsageProviderLabel(request.providerName, t).shortLabel,
       ].join(" · ")
     : undefined;
 

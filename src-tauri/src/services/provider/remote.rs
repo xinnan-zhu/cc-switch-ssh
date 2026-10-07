@@ -1767,7 +1767,8 @@ experimental_bearer_token = "sk-1"
             "env": {
                 "ANTHROPIC_BASE_URL": "https://new.example.com",
                 "ANTHROPIC_AUTH_TOKEN": "new-token",
-                "ANTHROPIC_MODEL": "new-model"
+                "ANTHROPIC_MODEL": "new-model",
+                "CLAUDE_CODE_AUTO_MODE_SERVER": "0"
             }
         }));
 
@@ -1780,6 +1781,7 @@ experimental_bearer_token = "sk-1"
         );
         assert_eq!(written["env"]["ANTHROPIC_AUTH_TOKEN"], "new-token");
         assert_eq!(written["env"]["ANTHROPIC_MODEL"], "new-model");
+        assert_eq!(written["env"]["CLAUDE_CODE_AUTO_MODE_SERVER"], "0");
         assert!(written["env"].get("ANTHROPIC_API_KEY").is_none());
         assert!(written["env"].get("ANTHROPIC_DEFAULT_OPUS_MODEL").is_none());
         assert_eq!(written["env"]["HTTPS_PROXY"], "http://proxy:3128");

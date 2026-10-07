@@ -304,3 +304,20 @@ jobs:
             - Windows 安装包未做代码签名，SmartScreen 提示时选择“仍要运行”。
             - 自动更新只跟随本仓库的 Release，不会被上游官方版本覆盖。
           files: release-assets/*
+
+      - name: Verify published release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          verification="$RUNNER_TEMP/published-release"
+          mkdir -p "$verification"
+          gh api "repos/$REPO/releases/tags/$TAG" > "$verification/release.json"
+          gh api "repos/$REPO/releases/latest" > "$verification/latest-release.json"
+          gh release download "$TAG" --repo "$REPO" \
+            --pattern latest.json --pattern '*.sig' --dir "$verification"
+          python3 scripts/verify-fork-release.py \
+            --repository "$REPO" --tag "$TAG" --directory "$verification"

@@ -1,5 +1,4 @@
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import { parse as parseToml } from "smol-toml";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
@@ -25,6 +24,7 @@ import {
   type SshHostEntry,
 } from "@/lib/api/providers";
 import { extractErrorMessage } from "@/utils/errorUtils";
+import { maskRemoteSettingsConfig } from "@/utils/remoteConfigPreview";
 import { proxyKeys } from "@/lib/query/proxy";
 import { cn } from "@/lib/utils";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -59,9 +59,6 @@ const SUPPORTED_REMOTE_APPS: AppId[] = [
   "gemini",
   "grokbuild",
 ];
-const SECRET_KEY_PATTERN =
-  /(api[_-]?key|token|secret|password|authorization|credential|auth)/i;
-
 const formatHostLabel = (host: SshHostEntry) => {
   const target = host.hostName
     ? `${host.hostName}${host.port ? `:${host.port}` : ""}`
@@ -103,27 +100,6 @@ const areTargetsEqual = (
     );
   }
   return false;
-};
-
-const maskSecrets = (value: unknown, keyHint = ""): unknown => {
-  if (Array.isArray(value)) {
-    return value.map((item) => maskSecrets(item, keyHint));
-  }
-
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>).map(([key, item]) => [
-        key,
-        maskSecrets(item, key),
-      ]),
-    );
-  }
-
-  if (typeof value === "string" && SECRET_KEY_PATTERN.test(keyHint)) {
-    return value.trim() ? "********" : value;
-  }
-
-  return value;
 };
 
 const getProviderSummary = (provider: Provider, appId: AppId) => {
@@ -316,23 +292,7 @@ export function RemoteProviderPage({
   const previewText = useMemo(() => {
     const config = remoteQuery.data?.provider?.settingsConfig;
     if (!config) return "";
-    if (typeof config.config === "string") {
-      try {
-        return JSON.stringify(
-          maskSecrets({ ...config, config: parseToml(config.config) }),
-          null,
-          2,
-        );
-      } catch {
-        // Never show raw, potentially credential-bearing TOML after a parse error.
-        return JSON.stringify(
-          maskSecrets({ ...config, config: "********" }),
-          null,
-          2,
-        );
-      }
-    }
-    return JSON.stringify(maskSecrets(config), null, 2);
+    return JSON.stringify(maskRemoteSettingsConfig(config), null, 2);
   }, [remoteQuery.data?.provider?.settingsConfig]);
   const remoteWarnings = remoteQuery.data?.warnings ?? [];
   const remoteFiles = remoteQuery.data?.files ?? [];

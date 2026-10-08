@@ -26,7 +26,9 @@ def verify(repository: str, tag: str, directory: Path) -> None:
         f"{prefix}-Linux-x86_64.AppImage",
         f"{prefix}-Linux-x86_64.AppImage.sig",
         f"{prefix}-Linux-x86_64.deb",
+        f"{prefix}-Linux-x86_64.deb.sig",
         f"{prefix}-Linux-x86_64.rpm",
+        f"{prefix}-Linux-x86_64.rpm.sig",
         "latest.json",
     }
     assets = {asset["name"]: asset for asset in release["assets"]}
@@ -40,6 +42,8 @@ def verify(repository: str, tag: str, directory: Path) -> None:
         "darwin-x86_64": f"{prefix}-macOS.tar.gz",
         "windows-x86_64": f"{prefix}-Windows.msi",
         "linux-x86_64": f"{prefix}-Linux-x86_64.AppImage",
+        "linux-x86_64-deb": f"{prefix}-Linux-x86_64.deb",
+        "linux-x86_64-rpm": f"{prefix}-Linux-x86_64.rpm",
     }
     if manifest["version"] != tag.removeprefix("v"):
         raise ValueError("Updater version differs from the published tag")
@@ -56,7 +60,9 @@ def verify(repository: str, tag: str, directory: Path) -> None:
     notes = Path(f"docs/release-notes/{tag}-zh.md")
     if notes.is_file() and release["body"].strip() != notes.read_text().strip():
         raise ValueError("Published release notes differ from the committed notes")
-    print(f"Verified {tag}: {len(expected)} assets, 4 updater platforms, latest release")
+    print(
+        f"Verified {tag}: {len(expected)} assets, {len(targets)} updater platforms, latest release"
+    )
 
 
 if __name__ == "__main__":

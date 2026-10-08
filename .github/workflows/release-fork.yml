@@ -207,10 +207,13 @@ jobs:
           mkdir -p release-assets
           cp "$APPIMAGE" "release-assets/CC-Switch-${TAG}-Linux-x86_64.AppImage"
           cp "$APPIMAGE.sig" "release-assets/CC-Switch-${TAG}-Linux-x86_64.AppImage.sig"
-          DEB=$(find "$BUNDLE_DIR" -name "*.deb" -type f | head -1 || true)
-          [ -n "$DEB" ] && cp "$DEB" "release-assets/CC-Switch-${TAG}-Linux-x86_64.deb"
-          RPM=$(find "$BUNDLE_DIR" -name "*.rpm" -type f | head -1 || true)
-          [ -n "$RPM" ] && cp "$RPM" "release-assets/CC-Switch-${TAG}-Linux-x86_64.rpm"
+          # deb/rpm installs update in place too, so each package ships its signature.
+          for ext in deb rpm; do
+            PKG=$(find "$BUNDLE_DIR" -name "*.$ext" -type f | head -1)
+            test -n "$PKG" && test -f "$PKG.sig"
+            cp "$PKG" "release-assets/CC-Switch-${TAG}-Linux-x86_64.$ext"
+            cp "$PKG.sig" "release-assets/CC-Switch-${TAG}-Linux-x86_64.$ext.sig"
+          done
           ls -la release-assets
 
       - name: Upload release artifacts to workflow
@@ -247,6 +250,8 @@ jobs:
           mac="CC-Switch-${TAG}-macOS.tar.gz"
           win="CC-Switch-${TAG}-Windows.msi"
           linux="CC-Switch-${TAG}-Linux-x86_64.AppImage"
+          deb="CC-Switch-${TAG}-Linux-x86_64.deb"
+          rpm="CC-Switch-${TAG}-Linux-x86_64.rpm"
           jq -n \
             --arg version "${TAG#v}" \
             --arg notes "Release $TAG" \
@@ -254,6 +259,8 @@ jobs:
             --arg mac_url "$base_url/$mac" --arg mac_sig "$(sig "$mac")" \
             --arg win_url "$base_url/$win" --arg win_sig "$(sig "$win")" \
             --arg linux_url "$base_url/$linux" --arg linux_sig "$(sig "$linux")" \
+            --arg deb_url "$base_url/$deb" --arg deb_sig "$(sig "$deb")" \
+            --arg rpm_url "$base_url/$rpm" --arg rpm_sig "$(sig "$rpm")" \
             '{
               version: $version,
               notes: $notes,
@@ -262,7 +269,9 @@ jobs:
                 "darwin-aarch64": { signature: $mac_sig, url: $mac_url },
                 "darwin-x86_64": { signature: $mac_sig, url: $mac_url },
                 "windows-x86_64": { signature: $win_sig, url: $win_url },
-                "linux-x86_64": { signature: $linux_sig, url: $linux_url }
+                "linux-x86_64": { signature: $linux_sig, url: $linux_url },
+                "linux-x86_64-deb": { signature: $deb_sig, url: $deb_url },
+                "linux-x86_64-rpm": { signature: $rpm_sig, url: $rpm_url }
               }
             }' > release-assets/latest.json
           cat release-assets/latest.json

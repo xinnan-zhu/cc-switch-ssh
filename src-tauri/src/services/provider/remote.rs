@@ -20,7 +20,7 @@ use crate::provider::Provider;
 use crate::store::AppState;
 
 use super::codex_direct;
-use crate::codex_config::codex_auth_has_credential_login_material;
+use crate::codex_config::{codex_auth_has_credential_login_material, extract_codex_auth_api_key};
 use crate::live::patch::toml::{TomlDocPatch, TomlSteps};
 use crate::live::patch::{LivePatch, LiveWriteError};
 use crate::live::project::claude::PROXY_TOKEN_PLACEHOLDER;
@@ -1015,7 +1015,9 @@ fn remote_provider_category(app: &AppType, settings: &Value) -> &'static str {
 
 /// Runs the local Codex write plan against the remote files. The remote has
 /// no login stash or managed accounts, so its own ChatGPT login is never
-/// removed. `bearer_token` replaces the proxy placeholder in a proxy route.
+/// removed. API-key routes also write auth.json for remote Codex versions
+/// that still need it. `bearer_token` replaces the proxy placeholder in both
+/// files, so a gateway never copies the local provider's upstream key.
 pub(super) fn build_remote_codex_writes(
     db: &crate::database::Database,
     prev: Option<&Provider>,
@@ -1027,17 +1029,27 @@ pub(super) fn build_remote_codex_writes(
     let planned = codex_direct::plan(db, &owner, &target, &codex_direct::Prepared::default())?;
     let mut config = planned.config;
 
-    let (auth_write, login_on_disk) =
-        remote_codex_auth(&planned.auth, snapshot.get(CODEX_AUTH_PATH))?;
+    // Resolve the actual route token before planning auth.json: in gateway
+    // mode it must be the host token, not the local proxy placeholder/key.
+    if let (RouteWrite::Custom(table), Some(token)) = (&mut config.route, bearer_token) {
+        table.insert("experimental_bearer_token", toml_edit::value(token));
+    }
+    let route_key = match (&config.route, planned.stamp) {
+        (RouteWrite::Custom(table), Some(RouteAuth::Bearer)) => table
+            .get("experimental_bearer_token")
+            .and_then(Item::as_str)
+            .map(str::trim)
+            .filter(|key| !key.is_empty()),
+        _ => None,
+    };
+    let (auth_write, auth_on_disk) =
+        remote_codex_auth(&planned.auth, snapshot.get(CODEX_AUTH_PATH), route_key)?;
     if let RouteWrite::Custom(table) = &mut config.route {
         if let Some(kind @ (RouteAuth::Bearer | RouteAuth::EnvKey)) = planned.stamp {
             table.insert(
                 "requires_openai_auth",
-                toml_edit::value(requires_openai_auth(kind, login_on_disk)),
+                toml_edit::value(requires_openai_auth(kind, auth_on_disk)),
             );
-        }
-        if let Some(token) = bearer_token {
-            table.insert("experimental_bearer_token", toml_edit::value(token));
         }
     }
 
@@ -1115,11 +1127,13 @@ fn remote_route_id(config: Option<&str>) -> Option<String> {
     Some(id.to_string())
 }
 
-/// What happens to the remote `auth.json`, and whether a ChatGPT login stays
-/// on disk afterwards (decides `requires_openai_auth`).
+/// Remote auth is never deleted. Preserve the host's credential login;
+/// otherwise mirror the active bearer key for clients that read auth.json.
+/// The bool reports usable auth for the route's `requires_openai_auth` flag.
 fn remote_codex_auth(
     goal: &codex_direct::AuthGoal,
     remote_auth: Option<&str>,
+    route_key: Option<&str>,
 ) -> Result<(Option<RemoteWrite>, bool), AppError> {
     use codex_direct::AuthGoal;
 
@@ -1129,7 +1143,8 @@ fn remote_codex_auth(
         .is_some_and(codex_auth_has_credential_login_material);
     Ok(match goal {
         AuthGoal::Official(auth) | AuthGoal::Managed(auth)
-            if codex_auth_has_credential_login_material(auth) =>
+            if codex_auth_has_credential_login_material(auth)
+                || extract_codex_auth_api_key(auth).is_some() =>
         {
             let write = RemoteWrite {
                 path: CODEX_AUTH_PATH,
@@ -1137,14 +1152,37 @@ fn remote_codex_auth(
             };
             (Some(write), true)
         }
-        // The key now lives in the route table; a key-only auth.json left
-        // behind would be sent nowhere and only confuses Codex's login screen.
-        AuthGoal::ThirdParty if remote.is_some() && !remote_login => (
-            Some(RemoteWrite {
-                path: CODEX_AUTH_PATH,
-                content: None,
-            }),
-            false,
+        AuthGoal::ThirdParty | AuthGoal::KeepNative if !remote_login && route_key.is_some() => {
+            // A malformed file might contain a login we could not recognize.
+            // Refuse the whole switch instead of replacing unknown credentials.
+            if remote_auth.is_some() && remote.as_ref().is_none_or(|auth| !auth.is_object()) {
+                return Err(AppError::Message(
+                    "远端 Codex auth.json 格式损坏，无法安全更新凭据；请先修复该文件".into(),
+                ));
+            }
+            let mut auth = remote.unwrap_or_else(|| json!({}));
+            // Metadata-only OAuth remnants are not a login, and partial token
+            // bundles / stale refresh timestamps can prevent Codex parsing auth.
+            let object = auth.as_object_mut().expect("validated object");
+            object.remove("tokens");
+            object.remove("last_refresh");
+            auth["OPENAI_API_KEY"] = json!(route_key.expect("checked above"));
+            auth["auth_mode"] = json!("apikey");
+            (
+                Some(RemoteWrite {
+                    path: CODEX_AUTH_PATH,
+                    content: Some(json_pretty(&auth)?),
+                }),
+                true,
+            )
+        }
+        AuthGoal::Official(_) | AuthGoal::Managed(_) => (
+            None,
+            remote_login
+                || remote
+                    .as_ref()
+                    .and_then(extract_codex_auth_api_key)
+                    .is_some(),
         ),
         _ => (None, remote_login),
     })
@@ -2111,35 +2149,296 @@ command = "tool"
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn remote_codex_switch_keeps_auth_file_and_updates_the_key() {
+        let db = crate::database::Database::memory().unwrap();
+        for initial_auth in [None, Some(r#"{"OPENAI_API_KEY":"sk-old"}"#)] {
+            let home = tempfile::tempdir().unwrap();
+            fs::create_dir_all(home.path().join(".codex")).unwrap();
+            if let Some(auth) = initial_auth {
+                fs::write(home.path().join(".codex/auth.json"), auth).unwrap();
+            }
+            let mut snapshot = RemoteSnapshot {
+                files: vec![
+                    (CODEX_AUTH_PATH, initial_auth.map(str::to_string)),
+                    (
+                        CODEX_CONFIG_PATH,
+                        Some(
+                            "model_provider = \"remote-route\"\n[model_providers.remote-route]\nbase_url = \"https://old.example/v1\"\n[mcp_servers.tool]\ncommand = \"host-tool\"\n"
+                                .into(),
+                        ),
+                    ),
+                ],
+            };
+            for (id, key) in [("first", "sk-first"), ("second", "sk-second")] {
+                let provider = Provider::with_id(
+                    id.into(),
+                    id.into(),
+                    json!({
+                        "auth": { "OPENAI_API_KEY": key },
+                        "config": format!(
+                            "model_provider = \"custom\"\n[model_providers.custom]\nbase_url = \"https://{id}.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
+                        )
+                    }),
+                    None,
+                );
+                let writes = build_remote_codex_writes(
+                    &db,
+                    None,
+                    codex_direct::Target::Direct(Some(&provider)),
+                    None,
+                    &snapshot,
+                )
+                .unwrap();
+                assert!(writes.iter().all(|write| write.content.is_some()));
+                run_local_sh(home.path(), &build_write_files_script(&writes).unwrap());
+                let output = run_local_sh(
+                    home.path(),
+                    &build_read_files_script(remote_config_paths(&AppType::Codex)),
+                );
+                snapshot.files = remote_config_paths(&AppType::Codex)
+                    .iter()
+                    .copied()
+                    .zip(parse_read_files_output(&output, 2).unwrap())
+                    .collect();
+                let auth: Value = serde_json::from_str(
+                    snapshot.get(CODEX_AUTH_PATH).expect("auth.json must exist"),
+                )
+                .unwrap();
+                assert_eq!(auth["OPENAI_API_KEY"], key);
+                let config = snapshot
+                    .get(CODEX_CONFIG_PATH)
+                    .unwrap()
+                    .parse::<DocumentMut>()
+                    .unwrap();
+                assert_eq!(config["model_provider"].as_str(), Some("remote-route"));
+                let route = &config["model_providers"]["remote-route"];
+                assert_eq!(route["experimental_bearer_token"].as_str(), Some(key));
+                assert_eq!(route["requires_openai_auth"].as_bool(), Some(true));
+                assert_eq!(
+                    config["mcp_servers"]["tool"]["command"].as_str(),
+                    Some("host-tool")
+                );
+                assert_eq!(
+                    fs::metadata(home.path().join(".codex/auth.json"))
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o600
+                );
+            }
+        }
+    }
+
     #[test]
     fn remote_codex_auth_never_drops_a_remote_login() {
         use codex_direct::AuthGoal;
 
         let login = json!({ "tokens": { "access_token": "at", "account_id": "acc" } }).to_string();
         let (write, login_on_disk) =
-            remote_codex_auth(&AuthGoal::ThirdParty, Some(&login)).unwrap();
+            remote_codex_auth(&AuthGoal::ThirdParty, Some(&login), Some("sk-new")).unwrap();
         assert!(write.is_none());
         assert!(login_on_disk);
 
         let key_only = json!({ "OPENAI_API_KEY": "sk-old" }).to_string();
         let (write, login_on_disk) =
-            remote_codex_auth(&AuthGoal::ThirdParty, Some(&key_only)).unwrap();
-        assert!(write.is_some_and(|write| write.content.is_none()));
-        assert!(!login_on_disk);
+            remote_codex_auth(&AuthGoal::ThirdParty, Some(&key_only), Some("sk-new")).unwrap();
+        let auth: Value = serde_json::from_str(write.unwrap().content.as_deref().unwrap()).unwrap();
+        assert_eq!(auth["OPENAI_API_KEY"], "sk-new");
+        assert!(login_on_disk);
 
-        let (write, _) = remote_codex_auth(&AuthGoal::ThirdParty, Some("{ broken")).unwrap();
-        assert!(write.is_none());
+        assert!(
+            remote_codex_auth(&AuthGoal::ThirdParty, Some("{ broken"), Some("sk-new")).is_err()
+        );
 
         let row = json!({ "tokens": { "refresh_token": "rt" } });
         let (write, login_on_disk) =
-            remote_codex_auth(&AuthGoal::Official(row), Some(&key_only)).unwrap();
+            remote_codex_auth(&AuthGoal::Official(row), Some(&key_only), None).unwrap();
         assert!(write.unwrap().content.unwrap().contains("refresh_token"));
         assert!(login_on_disk);
 
         let (write, login_on_disk) =
-            remote_codex_auth(&AuthGoal::Official(json!({})), Some(&login)).unwrap();
+            remote_codex_auth(&AuthGoal::Official(json!({})), Some(&login), None).unwrap();
         assert!(write.is_none());
         assert!(login_on_disk);
+    }
+
+    #[test]
+    fn remote_codex_official_api_key_switch_updates_auth() {
+        let db = crate::database::Database::memory().unwrap();
+        let mut official = Provider::with_id(
+            "official".into(),
+            "OpenAI API".into(),
+            json!({"auth": {"OPENAI_API_KEY": "sk-official"}, "config": ""}),
+            None,
+        );
+        official.category = Some("official".into());
+        let snapshot = RemoteSnapshot {
+            files: vec![(
+                CODEX_AUTH_PATH,
+                Some(r#"{"OPENAI_API_KEY":"sk-old"}"#.into()),
+            )],
+        };
+        let writes = build_remote_codex_writes(
+            &db,
+            None,
+            codex_direct::Target::Direct(Some(&official)),
+            None,
+            &snapshot,
+        )
+        .unwrap();
+        let auth: Value = serde_json::from_str(
+            writes
+                .iter()
+                .find(|write| write.path == CODEX_AUTH_PATH)
+                .unwrap()
+                .content
+                .as_deref()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(auth["OPENAI_API_KEY"], "sk-official");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires CC_SWITCH_CODEX_TEST_BIN; checks native login status in isolated CODEX_HOME"]
+    fn remote_codex_cli_recognizes_auth_after_switch() {
+        let binary = std::env::var("CC_SWITCH_CODEX_TEST_BIN").unwrap();
+        let db = crate::database::Database::memory().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let provider = Provider::with_id(
+            "remote-test".into(),
+            "Remote test".into(),
+            json!({
+                "auth": {"OPENAI_API_KEY": "sk-synthetic-remote-auth-test"},
+                "config": "model_provider = \"custom\"\n[model_providers.custom]\nbase_url = \"https://unused.invalid/v1\"\nwire_api = \"responses\"\n"
+            }),
+            None,
+        );
+        let snapshot = RemoteSnapshot {
+            files: vec![(
+                CODEX_CONFIG_PATH,
+                Some("cli_auth_credentials_store = \"file\"\n".into()),
+            )],
+        };
+        let writes = build_remote_codex_writes(
+            &db,
+            None,
+            codex_direct::Target::Direct(Some(&provider)),
+            None,
+            &snapshot,
+        )
+        .unwrap();
+        run_local_sh(home.path(), &build_write_files_script(&writes).unwrap());
+        // login status is local: no model request or user auth/keyring access.
+        let output = Command::new(binary)
+            .args(["login", "status"])
+            .env("CODEX_HOME", home.path().join(".codex"))
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("CODEX_API_KEY")
+            .output()
+            .unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "{text}");
+        assert!(text.contains("Logged in using an API key"), "{text}");
+    }
+
+    #[test]
+    fn remote_codex_non_bearer_routes_do_not_use_a_stale_auth_key() {
+        let db = crate::database::Database::memory().unwrap();
+        let auth = r#"{"OPENAI_API_KEY":"sk-old"}"#;
+        let snapshot = RemoteSnapshot {
+            files: vec![(CODEX_AUTH_PATH, Some(auth.into()))],
+        };
+        for route_fields in [
+            "env_key = \"REMOTE_KEY\"",
+            "http_headers = { Authorization = \"Bearer header-key\" }",
+            "",
+        ] {
+            let provider = Provider::with_id(
+                "custom".into(),
+                "Custom".into(),
+                json!({
+                    "auth": {},
+                    "config": format!(
+                        "model_provider = \"custom\"\n[model_providers.custom]\nbase_url = \"https://custom.example/v1\"\n{route_fields}\n"
+                    )
+                }),
+                None,
+            );
+            let writes = build_remote_codex_writes(
+                &db,
+                None,
+                codex_direct::Target::Direct(Some(&provider)),
+                None,
+                &snapshot,
+            )
+            .unwrap();
+            assert!(!writes.iter().any(|write| write.path == CODEX_AUTH_PATH));
+            let doc = writes
+                .iter()
+                .find(|write| write.path == CODEX_CONFIG_PATH)
+                .unwrap()
+                .content
+                .as_deref()
+                .unwrap()
+                .parse::<DocumentMut>()
+                .unwrap();
+            let route = &doc["model_providers"]["custom"];
+            assert_ne!(
+                route.get("requires_openai_auth").and_then(Item::as_bool),
+                Some(true)
+            );
+            assert!(route.get("experimental_bearer_token").is_none());
+        }
+    }
+
+    #[test]
+    fn remote_codex_auth_preserves_login_carriers_and_rejects_unknown_auth() {
+        use codex_direct::AuthGoal;
+        for login in [
+            json!({"tokens": {"refresh_token": "rt"}}),
+            json!({"personal_access_token": "pat"}),
+            json!({"agent_identity": {"token": "agent"}}),
+            json!({"bedrock_api_key": "bedrock"}),
+        ] {
+            for goal in [AuthGoal::ThirdParty, AuthGoal::KeepNative] {
+                let (write, authenticated) =
+                    remote_codex_auth(&goal, Some(&login.to_string()), Some("route-key")).unwrap();
+                assert!(write.is_none());
+                assert!(authenticated);
+            }
+        }
+        for broken in ["{ broken", "null", "[]", "\"unknown\""] {
+            assert!(
+                remote_codex_auth(&AuthGoal::ThirdParty, Some(broken), Some("route-key")).is_err()
+            );
+        }
+        let metadata = json!({
+            "OPENAI_API_KEY": "old", "auth_mode": "chatgpt", "host_setting": "keep",
+            "tokens": {"account_id": "old-account"}, "last_refresh": "stale-metadata"
+        });
+        let (write, authenticated) = remote_codex_auth(
+            &AuthGoal::ThirdParty,
+            Some(&metadata.to_string()),
+            Some("new"),
+        )
+        .unwrap();
+        let written: Value =
+            serde_json::from_str(write.unwrap().content.as_deref().unwrap()).unwrap();
+        assert!(authenticated);
+        assert_eq!(written["OPENAI_API_KEY"], "new");
+        assert_eq!(written["auth_mode"], "apikey");
+        assert_eq!(written["host_setting"], "keep");
+        assert!(written.get("tokens").is_none());
+        assert!(written.get("last_refresh").is_none());
     }
 
     #[test]

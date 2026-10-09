@@ -1368,6 +1368,81 @@ mod tests {
     }
 
     #[test]
+    fn codex_gateway_writes_host_token_to_auth_and_keeps_remote_login() {
+        use super::super::remote::{CODEX_AUTH_PATH, CODEX_CONFIG_PATH};
+        let state = AppState::new(Arc::new(Database::memory().unwrap()));
+        let target = SshConnectionTarget {
+            target_type: Some("manual".into()),
+            alias: None,
+            host: Some("test.example".into()),
+            user: None,
+            port: None,
+            password: None,
+        };
+        let record = ensure_record(&state.db, "test-host", &target, Some(23456)).unwrap();
+        let provider = Provider::with_id(
+            "upstream".into(),
+            "Upstream".into(),
+            json!({
+                "auth": {"OPENAI_API_KEY": "sk-local-upstream"},
+                "config": "model_provider = \"custom\"\n[model_providers.custom]\nbase_url = \"https://upstream.example/v1\"\n"
+            }),
+            None,
+        );
+        let login = r#"{"tokens":{"access_token":"remote-login"}}"#;
+        for auth in [None, Some(r#"{"OPENAI_API_KEY":"old"}"#), Some(login)] {
+            let snapshot = RemoteSnapshot {
+                files: vec![(CODEX_AUTH_PATH, auth.map(str::to_string))],
+            };
+            let writes = build_gateway_writes(
+                &state,
+                &AppType::Codex,
+                &record,
+                None,
+                Some(&provider),
+                &snapshot,
+            )
+            .unwrap();
+            assert!(writes.iter().all(|write| write.content.is_some()));
+            assert!(writes.iter().all(|write| !write
+                .content
+                .as_deref()
+                .unwrap()
+                .contains("sk-local-upstream")));
+            let auth_write = writes.iter().find(|write| write.path == CODEX_AUTH_PATH);
+            if auth == Some(login) {
+                assert!(
+                    auth_write.is_none(),
+                    "preserve the host login byte for byte"
+                );
+            } else {
+                let written: Value =
+                    serde_json::from_str(auth_write.unwrap().content.as_deref().unwrap()).unwrap();
+                assert_eq!(written["OPENAI_API_KEY"], record.token);
+            }
+            let doc = writes
+                .iter()
+                .find(|write| write.path == CODEX_CONFIG_PATH)
+                .unwrap()
+                .content
+                .as_deref()
+                .unwrap()
+                .parse::<toml_edit::DocumentMut>()
+                .unwrap();
+            let route = &doc["model_providers"]["custom"];
+            assert_eq!(
+                route["experimental_bearer_token"].as_str(),
+                Some(record.token.as_str())
+            );
+            assert_eq!(route["requires_openai_auth"].as_bool(), Some(true));
+            assert_eq!(
+                route["base_url"].as_str(),
+                Some("http://127.0.0.1:23456/v1")
+            );
+        }
+    }
+
+    #[test]
     fn grok_gateway_uses_its_app_route_and_keeps_host_settings() {
         use super::super::remote::GROK_CONFIG_PATH;
         let state = AppState::new(Arc::new(Database::memory().unwrap()));

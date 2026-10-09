@@ -252,6 +252,14 @@ jobs:
           linux="CC-Switch-${TAG}-Linux-x86_64.AppImage"
           deb="CC-Switch-${TAG}-Linux-x86_64.deb"
           rpm="CC-Switch-${TAG}-Linux-x86_64.rpm"
+          # Refuse publication if any updater package lacks its signature.
+          for asset in "$mac" "$win" "$linux" "$deb" "$rpm"; do
+            signature="release-assets/$asset.sig"
+            if [[ ! -s "$signature" ]] || [[ -z "$(tr -d '[:space:]' < "$signature")" ]]; then
+              echo "Missing updater signature: $asset" >&2
+              exit 1
+            fi
+          done
           jq -n \
             --arg version "${TAG#v}" \
             --arg notes "Release $TAG" \

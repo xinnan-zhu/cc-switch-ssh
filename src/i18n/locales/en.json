@@ -126,6 +126,18 @@
     "stackDefaultHint": "This is the default provider: the first model in its list handles Claude Code's startup and background tasks",
     "officialModelsBundled": "The official model list isn't available yet, so Codex's built-in list is used for now and account-specific models may be missing",
     "officialModelsUnavailable": "Aggregated models are unavailable for now: the Codex model list can't be read",
+    "officialModelsOutdated": "Codex on this computer is too old to get the full official model list: update Codex (including the CLI) to the latest version",
+    "officialModelsReason": {
+      "noLogin": "Official list: Codex has no usable ChatGPT login. Sign in to Codex with a ChatGPT account",
+      "loginStale": "Official list: the Codex login hasn't been refreshed for over 8 days. Use Codex once and it refreshes automatically",
+      "loginIncomplete": "Official list: the Codex login is incomplete (missing the workspace or user ID). Sign in to Codex again",
+      "noVersion": "Official list: can't read the Codex version on this computer. It will retry after you start a conversation in Codex",
+      "fetchFailed": "Official list: fetching it failed; retrying every 15 minutes (see the log for details)",
+      "invalidList": "Official list: the returned data is incomplete (see the log for details)",
+      "noCli": "Codex built-in list: no Codex CLI found on this computer",
+      "cliFailed": "Codex built-in list: the Codex CLI didn't output a model list (see the log for details)",
+      "nothingUsable": "Codex built-in list: it has no usable models. Update Codex to the latest version"
+    },
     "routeOwnsCatalog": "Aggregated models won't show up in Codex: the routed provider uses its own model catalog file (model_catalog_json)",
     "adoptCatalog": "Use CC Switch's model catalog",
     "adoptCatalogDone": "Now using CC Switch's model catalog. Restart Codex to apply",
@@ -157,7 +169,8 @@
     "dragHandle": "Drag to reorder",
     "searchPlaceholder": "Search name, notes, or URL...",
     "searchAriaLabel": "Search providers",
-    "searchScopeHint": "Matches provider name, notes, and URL.",
+    "searchScopeHint": "Matches provider name, notes, website, and API address.",
+    "searchButtonTip": "Search providers ({{shortcut}})",
     "searchCloseHint": "Press Esc to close",
     "searchCloseAriaLabel": "Close provider search",
     "noSearchResults": "No providers match your search.",
@@ -338,13 +351,13 @@
     },
     "unifyCodexHistory": {
       "title": "Unified Codex session history",
-      "message": "When enabled, the official subscription and third-party providers share one session history list. Note: resuming an old session across providers may fail because its encrypted_content reasoning cannot be decrypted by another backend.\n\nYou can also migrate your existing official session history into the shared list (originals are backed up to ~/.cc-switch/backups first and can be restored when you turn this off).",
+      "message": "When enabled, the Codex CLI resume list shows official subscription and third-party sessions together (the Codex desktop app can show all sessions since a recent update and is unaffected). Note: resuming an old session across providers may fail because the other backend cannot decrypt its encrypted_content reasoning.\n\nYou can also migrate your existing official session history into the shared list (backed up to ~/.cc-switch/backups first; you can restore it when turning this off).",
       "migrateExisting": "Also migrate existing official session history",
       "confirm": "I understand, enable"
     },
     "unifyCodexHistoryOff": {
       "title": "Turn off unified session history",
-      "message": "After turning this off, the official subscription and third-party providers return to separate history lists. Sessions created while it was on cannot be attributed to a provider, so they stay in the third-party history and the official subscription will not see them.",
+      "message": "When turned off, the Codex CLI goes back to separate session lists for the official subscription and third-party providers (the desktop app still shows all sessions). Sessions created while this was on can't be told apart, so they stay in the third-party history and the CLI won't show them under the official subscription.",
       "restoreBackup": "Restore the official sessions migrated at enable time back to the official history (exact restore from backup)",
       "confirm": "Turn off"
     },
@@ -363,6 +376,10 @@
     "title": "Settings",
     "general": {
       "appearance": "Appearance",
+      "quotaDisplay": "Quota display",
+      "quotaDisplayLeft": "Left",
+      "quotaDisplayUsed": "Used",
+      "quotaDisplayHelp": "Whether each quota window on provider cards, in Accounts and in the tray shows how much is left or how much is used. Balances and Credits always show what is left.",
       "sidebarAndHeader": "Sidebar and header",
       "visibleApps": "Apps shown in the sidebar",
       "goToApps": "Open Apps",
@@ -455,6 +472,8 @@
         "description": "Control the output level for application diagnostic logs",
         "enabled": "Enable Diagnostic Logs",
         "enabledDescription": "Controls cc-switch.log; request usage records and crash.log are unaffected",
+        "openLog": "Open log",
+        "openLogFailed": "Failed to open the log location: {{error}}",
         "level": "Log Level",
         "levelDescription": "Set the minimum log level to output",
         "levels": {
@@ -555,7 +574,7 @@
         },
         "codexHistoryUnify": {
           "name": "Codex session unify migration backups",
-          "hint": "Session copies kept when \"Unify Codex session history\" migrated existing sessions. \"Restore backup\" when turning that switch off depends on them; after deleting, migrated official sessions can no longer be moved back to their original group."
+          "hint": "Session copies kept when \"Unified Codex session history\" migrated existing sessions. \"Restore backup\" when turning that switch off depends on them; after deleting, migrated official sessions can no longer be moved back to their original group."
         },
         "codexHistoryUnifyRestore": {
           "name": "Codex session unify restore backups",
@@ -810,7 +829,14 @@
     "preserveCodexOfficialAuthOnSwitch": "Keep official login for direct switches",
     "preserveCodexOfficialAuthOnSwitchDescription": "Controls third-party switches when local routing is off. Takeover routing always preserves the Codex official login.",
     "unifyCodexSessionHistory": "Unified Codex session history",
-    "unifyCodexSessionHistoryDescription": "When enabled, the official subscription runs under the shared \"custom\" provider id so official and third-party sessions appear in one history list, optionally migrating existing official sessions in (backed up first). When turning it off, the migrated sessions can be restored from backup. Note: resuming an old session across providers may fail because its encrypted_content reasoning can only be decrypted by the backend that created it.",
+    "unifyCodexSessionHistoryDescription": "Affects the Codex CLI only: its resume list shows only the current provider's sessions. When enabled, the official subscription runs under the shared \"custom\" provider id so official and third-party sessions appear in one list. The Codex desktop app can show all sessions since a recent update, so desktop-only users don't need this. You can optionally migrate existing official sessions in (backed up first) and restore them from backup when turning it off. Note: resuming an old session across providers may fail because its encrypted_content reasoning can only be decrypted by the backend that created it.",
+    "codexStackClassicSubagents": "Classic sub-agent tools in aggregation",
+    "codexStackClassicSubagentsDescription": "In Codex aggregation mode, a sub-agent whose model comes from a different provider than the main agent may not be able to read its task: the newer Codex sub-agent tools have the main agent's provider encrypt the task, and no other provider can decrypt it. When enabled, every aggregated model uses the classic Codex sub-agent tools, which pass the task as plain text; the trade-off is losing newer features such as followup_task and interrupt_agent. Only affects aggregation mode; restart Codex for the change to take effect.",
+    "codexStackClassicSubagentsForcedV2": "Codex config.toml turns on [features] multi_agent_v2, which takes precedence over this setting, so it has no effect.",
+    "codexSessionCompression": "Compress old Codex sessions",
+    "codexSessionCompressionDescription": "When on, Codex compresses session files that haven't changed for 7 days in the background each time it starts, which saves a lot of disk space. Codex decompresses a session automatically when you continue it. CC Switch still lists and counts compressed sessions; the list just doesn't show a preview of their last reply. This is a Codex feature still under development: Codex shows a notice on every start while it's on. Requires a recent Codex version and takes effect after restarting Codex. Turning it off stops compressing; sessions already compressed stay as they are.",
+    "codexSessionCompressionUsage": "Sessions currently use {{size}}",
+    "codexSessionCompressionFailed": "Failed to change the Codex session compression setting",
     "unifyCodexHistoryRestoreCompleted": "Official session history restored from backup ({{files}} session files, {{rows}} index rows)",
     "unifyCodexHistoryRestoreFailed": "Failed to restore official session history, please try again",
     "unifyCodexHistoryRestoreNothing": "No restorable migration backup for the current Codex directory",
@@ -823,7 +849,9 @@
       "geminiDesc": "Google Gemini CLI",
       "opencodeDesc": "OpenCode CLI",
       "showProfileSwitcher": "Show project switcher",
-      "showProfileSwitcherDescription": "Show the project switcher in the main page header"
+      "showProfileSwitcherDescription": "Show the project switcher in the main page header",
+      "showProviderSearch": "Show provider search",
+      "showProviderSearchDescription": "Show a search button at the top of the provider page to find providers by name, notes, website, or API address. When hidden, ⌘F / Ctrl+F still opens search"
     },
     "terminal": {
       "title": "Preferred Terminal",
@@ -3238,7 +3266,6 @@
     "checkUpdates": "Check Updates",
     "checkingUpdates": "Checking...",
     "noUpdates": "All skills are up to date",
-    "updatesFound": "{{count}} skill(s) have updates available",
     "updateAll": "Update All ({{count}})",
     "updatingAll": "Updating...",
     "updateAllSuccess": "Successfully updated {{count}} skill(s)",
@@ -3663,15 +3690,18 @@
       "ariaLabel": "{{appLabel}} Aggregation mode",
       "failoverUnavailable": "{{appLabel}} is in Aggregation mode, which has no failover. The queue and settings are kept and apply again in routing mode",
       "codexStale": {
-        "title": "Codex is still using an old model list, so aggregated models won't show",
+        "authTitle": "Codex may still cache the previous account; restart its background server to load the new login",
+        "title": "Codex is still using an old model list, so the current models won't show",
+        "unverifiedTitle": "Codex apps that were open before the switch may still use the previous account or model list",
+        "unverifiedHint": "CC Switch can't tell whether the desktop app or editor extensions are running. If they aren't open, just close this notice.",
         "daemon": "CLI: reopening codex isn't enough; its background daemon needs a restart.",
         "others": "Desktop app: quit it completely and reopen it (⌘Q on macOS; closing the window isn't enough). Editor extensions: reopen the editor window.",
         "restart": "Restart Codex daemon",
         "confirmTitle": "Restart the Codex daemon?",
-        "confirmMessage": "Every codex session in your terminals shares this daemon, so running tasks will be interrupted. Reopen codex afterwards to see the aggregated models.",
+        "confirmMessage": "Every codex session in your terminals shares this daemon, so running tasks will be interrupted. Reopen codex afterwards to load the current account and model list.",
         "confirm": "Restart",
-        "restarted": "Codex daemon restarted. Reopen codex to see the aggregated models",
-        "notRunning": "The Codex daemon isn't running. codex will load the new model list the next time it starts",
+        "restarted": "Codex daemon restarted. Reopen codex to load the current account and model list",
+        "notRunning": "The Codex daemon isn't running. It will load the current login and model list the next time it starts",
         "failed": "Failed to restart the Codex daemon: {{error}}"
       }
     },
@@ -4311,7 +4341,9 @@
     "tierShort": "{{label}} {{value}}%",
     "tierLeft": "{{label}} {{value}}% left",
     "tierUsedUp": "{{label}} used up",
+    "tierUsed": "{{label}} {{value}}% used",
     "left": "{{value}}% left",
+    "used": "{{value}}% used",
     "usedUp": "Used up",
     "balance": "Balance {{value}}",
     "balanceUsedUp": "Balance used up",
@@ -4608,7 +4640,8 @@
       "uninstallManyButton": "Uninstall {{count}}",
       "updateAll": "Update {{count}} Skills?",
       "updateBody": "Updating replaces the local folder with the repository's content. Local edits are kept only in the backup ({{path}}).",
-      "updateAllButton": "Update {{count}}"
+      "updateAllButton": "Update {{count}}",
+      "updateListAria": "Skills to update"
     },
     "toast": {
       "installed": "Installed {{name}} and enabled it in {{apps}}",
@@ -4697,7 +4730,8 @@
     "headerUpdates": "{{count}} updates",
     "headerUpdatesShow": "Show only Skills with updates",
     "headerUpdatesClear": "Show all Skills",
-    "updateAllCount": "Update all ({{count}})"
+    "updateAllCount": "Update all ({{count}})",
+    "updatingProgress": "Updating {{done}}/{{total}}…"
   },
   "newLayoutNotice": {
     "title": "CC Switch has a new look",

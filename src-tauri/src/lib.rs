@@ -6,6 +6,7 @@ mod claude_mcp;
 mod claude_plugin;
 mod codex_config;
 mod codex_history_migration;
+mod codex_rollout_file;
 mod codex_state_db;
 mod commands;
 mod config;
@@ -1435,6 +1436,7 @@ pub fn run() {
             commands::get_skills_migration_result,
             commands::get_app_config_path,
             commands::open_app_config_folder,
+            commands::reveal_app_log_file,
             commands::get_claude_common_config_snippet,
             commands::set_claude_common_config_snippet,
             commands::get_common_config_snippet,
@@ -1444,6 +1446,10 @@ pub fn run() {
             commands::get_settings,
             commands::save_settings,
             commands::has_codex_unify_history_backup,
+            commands::codex_forces_multi_agent_v2,
+            commands::get_codex_session_compression,
+            commands::set_codex_session_compression,
+            commands::get_codex_sessions_disk_usage,
             commands::restore_codex_unified_history,
             commands::get_rectifier_config,
             commands::set_rectifier_config,
@@ -1631,6 +1637,7 @@ pub fn run() {
             commands::set_proxy_stack_member,
             commands::adopt_codex_stack_catalog,
             commands::restart_codex_app_server_daemon,
+            commands::acknowledge_codex_stale_clients,
             // Proxy failover commands
             commands::get_provider_health,
             commands::reset_circuit_breaker,

@@ -274,6 +274,106 @@ describe("OpenCodeFormFields", () => {
     expect(props.onModelsChange).not.toHaveBeenCalled();
   });
 
+  it("sends the configured provider headers when fetching models", async () => {
+    vi.mocked(fetchModelsForConfig).mockResolvedValue([]);
+    renderOpenCodeForm({
+      headers: {
+        "cf-aig-authorization": "Bearer gateway-key",
+        "draft-header:1700000000000": "unfinished",
+      },
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "providerForm.fetchModels" }),
+    );
+
+    await waitFor(() => expect(fetchModelsForConfig).toHaveBeenCalledTimes(1));
+    expect(fetchModelsForConfig).toHaveBeenCalledWith(
+      "https://api.example.com/v1",
+      "sk-test",
+      undefined,
+      undefined,
+      undefined,
+      {
+        requestHeaders: { "cf-aig-authorization": "Bearer gateway-key" },
+      },
+    );
+  });
+
+  it("passes a User-Agent provider header as the model fetch user agent", async () => {
+    vi.mocked(fetchModelsForConfig).mockResolvedValue([]);
+    renderOpenCodeForm({
+      headers: { "User-Agent": "cc-switch-test" },
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "providerForm.fetchModels" }),
+    );
+
+    await waitFor(() => expect(fetchModelsForConfig).toHaveBeenCalledTimes(1));
+    expect(fetchModelsForConfig).toHaveBeenCalledWith(
+      "https://api.example.com/v1",
+      "sk-test",
+      undefined,
+      undefined,
+      "cc-switch-test",
+      { requestHeaders: { "User-Agent": "cc-switch-test" } },
+    );
+  });
+
+  it("fetches models with headers alone when the API key is empty", async () => {
+    vi.mocked(fetchModelsForConfig).mockResolvedValue([]);
+    renderOpenCodeForm({
+      apiKey: "",
+      headers: { "cf-aig-authorization": "Bearer gateway-key" },
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "providerForm.fetchModels" }),
+    );
+
+    await waitFor(() => expect(fetchModelsForConfig).toHaveBeenCalledTimes(1));
+    expect(fetchModelsForConfig).toHaveBeenCalledWith(
+      "https://api.example.com/v1",
+      "",
+      undefined,
+      undefined,
+      undefined,
+      {
+        requestHeaders: { "cf-aig-authorization": "Bearer gateway-key" },
+      },
+    );
+  });
+
+  it("clears fetched models and pending selections when headers change", async () => {
+    vi.mocked(fetchModelsForConfig).mockResolvedValue([
+      { id: "old-model", ownedBy: null },
+    ]);
+    const { props, rerender } = renderOpenCodeForm({
+      headers: { "X-Title": "CC Switch" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "providerForm.fetchModels" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("checkbox", { name: "old-model" }),
+    );
+
+    rerender(
+      <FormShell>
+        <OpenCodeFormFields
+          {...props}
+          headers={{ "X-Title": "OpenCode" }}
+        />
+      </FormShell>,
+    );
+
+    expect(
+      screen.queryByRole("checkbox", { name: "old-model" }),
+    ).not.toBeInTheDocument();
+    expect(props.onModelsChange).not.toHaveBeenCalled();
+  });
+
   it.each(["empty", "failure"])(
     "removes previous choices after an %s fetch without changing configured models",
     async (result) => {
@@ -432,6 +532,21 @@ describe("OpenCodeFormFields", () => {
 
     const nextOptions = onExtraOptionsChange.mock.calls[0][0];
     expect(Object.keys(nextOptions)[0]).toMatch(/^draft-option:/);
+  });
+
+  it("rejects renaming an extra option onto an existing key and restores the input", () => {
+    const onExtraOptionsChange = vi.fn();
+    renderOpenCodeForm({
+      extraOptions: { target: "100", source: "100" },
+      onExtraOptionsChange,
+    });
+
+    const keyInput = screen.getByDisplayValue("source");
+    fireEvent.change(keyInput, { target: { value: "target" } });
+    fireEvent.blur(keyInput);
+
+    expect(onExtraOptionsChange).not.toHaveBeenCalled();
+    expect(keyInput).toHaveValue("source");
   });
 
   it("uses the family section divider for model configuration", () => {

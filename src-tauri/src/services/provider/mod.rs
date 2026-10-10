@@ -21,6 +21,7 @@ mod live;
 mod opencode_tests;
 mod pi;
 mod remote;
+mod remote_cli;
 mod remote_gateway;
 mod usage;
 
@@ -46,6 +47,7 @@ pub use remote::{
     RemoteApplyResult, RemoteImportResult, RemoteProviderService, RemoteProviderState,
     RemoteRestartResult, SshConnectionTarget, SshHostEntry,
 };
+pub use remote_cli::{RemoteCliReport, RemoteCliService, RemoteCliUpdateResult};
 pub use remote_gateway::{
     RemoteGatewayApplyResult, RemoteGatewayOverview, RemoteGatewayService, RemoteGatewayState,
 };

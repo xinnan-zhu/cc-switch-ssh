@@ -2,6 +2,13 @@
   "version": "4.0.8",
   "items": [
     {
+      "type": "new",
+      "zh": "SSH 远端页可一键更新服务器上的 Claude Code 等 CLI",
+      "zh-TW": "SSH 遠端頁可一鍵更新伺服器上的 Claude Code 等 CLI",
+      "en": "Update Claude Code, Codex and other CLIs on an SSH server in one click from the remote page",
+      "ja": "SSH サーバー上の Claude Code や Codex などの CLI をワンクリックで更新"
+    },
+    {
       "type": "fix",
       "zh": "只装了 Codex 桌面版也能用 Codex 聚合模式",
       "zh-TW": "只安裝 Codex 桌面版也能使用 Codex 聚合模式",
@@ -14,13 +21,6 @@
       "zh-TW": "讀不到官方模型列表時提示會寫明原因，恢復後自動消失",
       "en": "When the official model list is unavailable, the notice says why and clears once it is back",
       "ja": "公式モデル一覧を読めないときは理由を表示し、復旧すると自動で消えるように"
-    },
-    {
-      "type": "fix",
-      "zh": "获取模型列表时会带上供应商配置的请求头",
-      "zh-TW": "取得模型列表時會帶上供應商設定的請求標頭",
-      "en": "Fetching model lists now sends the provider's configured request headers",
-      "ja": "モデル一覧の取得時にプロバイダーで設定したリクエストヘッダーを送信"
     },
     {
       "type": "improve",

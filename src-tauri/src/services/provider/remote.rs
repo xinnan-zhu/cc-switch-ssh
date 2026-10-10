@@ -1314,7 +1314,7 @@ fn build_write_files_script(writes: &[RemoteWrite]) -> Result<String, AppError> 
     Ok(script)
 }
 
-fn shell_single_quote(value: &str) -> String {
+pub(super) fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 

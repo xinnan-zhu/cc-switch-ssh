@@ -1265,6 +1265,20 @@ async fn fetch_npm_latest_for_tool(
     pick_latest_version(&dist_tags, npm_prerelease_tags(tool), local_version)
 }
 
+/// cc-switch-ssh: npm 上该工具要展示的最新版本，供远端 CLI 更新复用同一套查询。
+pub(crate) async fn npm_latest_version_for_tool(
+    tool: &str,
+    current: Option<&str>,
+) -> Option<String> {
+    let package = npm_package_for(tool)?;
+    fetch_npm_latest_for_tool(&crate::proxy::http_client::get(), package, tool, current).await
+}
+
+/// cc-switch-ssh: `npm i -g <pkg>@latest` 须带的额外参数（见 `npm_install_extra_args`）。
+pub(crate) fn npm_install_args_for_tool(tool: &str) -> Option<(&'static str, &'static str)> {
+    Some((npm_package_for(tool)?, npm_install_extra_args(tool)))
+}
+
 /// 版本探测请求的请求级超时。全局客户端是给代理转发用的（总超时 600s / 连接 30s），
 /// 探测 latest 若沿用它，api.github.com / pypi.org 被阻断或握手后挂起时，Hermes 卡片
 /// 与「刷新 / 全部升级」按钮会一直等；探测拿不到就退到下一来源或显示未知即可。

@@ -41,6 +41,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { RemoteCliCard } from "./RemoteCliCard";
 import { RemoteGatewayCard } from "./RemoteGatewayCard";
 import { REMOTE_GATEWAY_OVERVIEW_KEY } from "./RemoteGatewayIndicator";
 
@@ -1056,6 +1057,17 @@ export function RemoteProviderPage({
             defaultValue: "正在读取远端配置...",
           })}
         </div>
+      )}
+
+      {connectedTarget && remoteQuery.data && (
+        <RemoteCliCard
+          key={connectedTargetKey}
+          target={connectedTarget}
+          targetKey={connectedTargetKey}
+          hostLabel={connectedHost}
+          appId={appId}
+          onRestartProcesses={() => startRestart(connectedTarget)}
+        />
       )}
 
       {remoteQuery.data && (

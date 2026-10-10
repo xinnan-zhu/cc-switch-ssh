@@ -2656,6 +2656,27 @@
       "manage": "リモート管理を開く",
       "followLocalShort": "ローカルに従う · {{name}}",
       "indicatorHint": "これらのサーバーは SSH トンネル経由でローカルゲートウェイを使用しています。このマシンをオンラインに保ってください。"
+    },
+    "cli": {
+      "title": "リモート CLI のバージョン",
+      "description": "{{host}} にインストールされた Claude Code、Codex、Gemini CLI、Grok Build を、元のインストール方法（npm、公式インストーラー、Homebrew）で更新します。",
+      "updatesAvailable": "{{count}} 件の更新",
+      "updateAll": "すべて更新",
+      "update": "更新",
+      "updating": "更新中",
+      "queued": "待機中",
+      "checking": "リモートのバージョンを確認中...",
+      "notInstalled": "未インストール",
+      "versionUnknown": "バージョンを取得できません",
+      "currentApp": "現在",
+      "sourceNative": "公式",
+      "sourceUnknown": "不明なソース",
+      "manualOnly": "手動で更新",
+      "manualHint": "インストール方法を判別できません（{{path}}）。サーバー上で手動で更新してください。",
+      "updated": "{{app}} を更新しました：{{from}} → {{to}}",
+      "updatedHint": "実行中の {{app}} プロセスは再起動後に新しいバージョンを使います。",
+      "unchanged": "{{app}} の更新コマンドは完了しましたが、バージョンは {{version}} のままです。このインストール方法では最新の可能性があります。",
+      "updateFailed": "{{app}} の更新に失敗しました"
     }
   },
   "mcp": {

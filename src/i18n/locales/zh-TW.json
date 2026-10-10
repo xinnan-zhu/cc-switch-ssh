@@ -2657,6 +2657,27 @@
       "manage": "開啟遠端管理",
       "followLocalShort": "跟隨本地 · {{name}}",
       "indicatorHint": "這些伺服器透過 SSH 通道使用本機閘道，需要本機保持在線。"
+    },
+    "cli": {
+      "title": "遠端 CLI 版本",
+      "description": "{{host}} 上已安裝的 Claude Code、Codex、Gemini CLI 和 Grok Build，依原安裝方式（npm、官方安裝或 Homebrew）更新。",
+      "updatesAvailable": "{{count}} 個可更新",
+      "updateAll": "全部更新",
+      "update": "更新",
+      "updating": "更新中",
+      "queued": "等待中",
+      "checking": "正在檢測遠端版本...",
+      "notInstalled": "未安裝",
+      "versionUnknown": "無法讀取版本",
+      "currentApp": "目前",
+      "sourceNative": "官方安裝",
+      "sourceUnknown": "未知來源",
+      "manualOnly": "需手動更新",
+      "manualHint": "無法識別安裝方式（{{path}}），請在伺服器上手動更新。",
+      "updated": "{{app}} 已更新：{{from}} → {{to}}",
+      "updatedHint": "已執行的 {{app}} 程序重新啟動後才會使用新版本。",
+      "unchanged": "{{app}} 更新指令已完成，版本仍為 {{version}}。可能已是該安裝管道的最新版。",
+      "updateFailed": "更新 {{app}} 失敗"
     }
   },
   "mcp": {

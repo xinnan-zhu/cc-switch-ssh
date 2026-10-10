@@ -8,10 +8,11 @@ use crate::error::AppError;
 use crate::provider::{ClaudeDesktopMode, Provider, ProviderMeta};
 use crate::services::provider::{EditorSave, EditorView};
 use crate::services::{
-    EndpointLatency, ProviderService, ProviderSortUpdate, RemoteApplyResult,
-    RemoteGatewayApplyResult, RemoteGatewayOverview, RemoteGatewayService, RemoteGatewayState,
-    RemoteImportResult, RemoteProviderService, RemoteProviderState, RemoteRestartResult,
-    SpeedtestService, SshConnectionTarget, SshHostEntry, SwitchResult,
+    EndpointLatency, ProviderService, ProviderSortUpdate, RemoteApplyResult, RemoteCliReport,
+    RemoteCliService, RemoteCliUpdateResult, RemoteGatewayApplyResult, RemoteGatewayOverview,
+    RemoteGatewayService, RemoteGatewayState, RemoteImportResult, RemoteProviderService,
+    RemoteProviderState, RemoteRestartResult, SpeedtestService, SshConnectionTarget, SshHostEntry,
+    SwitchResult,
 };
 use crate::store::AppState;
 use std::str::FromStr;
@@ -280,6 +281,26 @@ pub async fn restart_remote_app_processes(
     })
     .await
     .map_err(|e| format!("重启远端进程失败: {e}"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_remote_cli_versions(
+    target: SshConnectionTarget,
+) -> Result<RemoteCliReport, String> {
+    RemoteCliService::versions(&target)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn update_remote_cli(
+    app: String,
+    target: SshConnectionTarget,
+) -> Result<RemoteCliUpdateResult, String> {
+    let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    RemoteCliService::update(&target, app_type)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command(rename_all = "camelCase")]

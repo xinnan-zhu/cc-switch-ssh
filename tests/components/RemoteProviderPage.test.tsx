@@ -8,6 +8,10 @@ describe("remote Grok configuration preview", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     vi.spyOn(providersApi, "getSshHosts").mockResolvedValue([]);
+    vi.spyOn(providersApi, "getRemoteCliVersions").mockResolvedValue({
+      hostAlias: "test-host",
+      clis: [],
+    });
     vi.spyOn(providersApi, "getRemoteGatewayState").mockResolvedValue({
       hostKey: "test-host",
       app: "grokbuild",

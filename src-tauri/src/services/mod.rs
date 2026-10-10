@@ -43,10 +43,10 @@ pub use mcp::McpService;
 pub use omo::OmoService;
 pub use prompt::PromptService;
 pub use provider::{
-    ProviderService, ProviderSortUpdate, RemoteApplyResult, RemoteGatewayApplyResult,
-    RemoteGatewayOverview, RemoteGatewayService, RemoteGatewayState, RemoteImportResult,
-    RemoteProviderService, RemoteProviderState, RemoteRestartResult, SshConnectionTarget,
-    SshHostEntry, SwitchResult,
+    ProviderService, ProviderSortUpdate, RemoteApplyResult, RemoteCliReport, RemoteCliService,
+    RemoteCliUpdateResult, RemoteGatewayApplyResult, RemoteGatewayOverview, RemoteGatewayService,
+    RemoteGatewayState, RemoteImportResult, RemoteProviderService, RemoteProviderState,
+    RemoteRestartResult, SshConnectionTarget, SshHostEntry, SwitchResult,
 };
 pub use proxy::ProxyService;
 #[allow(unused_imports)]

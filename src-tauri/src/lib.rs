@@ -1411,6 +1411,8 @@ pub fn run() {
             commands::inspect_remote_provider,
             commands::import_remote_provider,
             commands::restart_remote_app_processes,
+            commands::get_remote_cli_versions,
+            commands::update_remote_cli,
             commands::get_remote_gateway_overview,
             commands::get_remote_gateway_state,
             commands::enable_remote_gateway,

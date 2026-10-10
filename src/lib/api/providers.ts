@@ -132,6 +132,31 @@ export interface RemoteRestartResult {
   forceKilled: number[];
 }
 
+export type RemoteCliSource = "missing" | "npm" | "native" | "brew" | "unknown";
+
+export interface RemoteCliInfo {
+  app: AppId;
+  tool: string;
+  path: string | null;
+  version: string | null;
+  latestVersion: string | null;
+  source: RemoteCliSource;
+  updatable: boolean;
+  error: string | null;
+}
+
+export interface RemoteCliReport {
+  hostAlias: string;
+  clis: RemoteCliInfo[];
+}
+
+export interface RemoteCliUpdateResult {
+  hostAlias: string;
+  previousVersion: string | null;
+  cli: RemoteCliInfo;
+  command: string;
+}
+
 export interface ClaudeDesktopStatus {
   supported: boolean;
   configured: boolean;
@@ -289,6 +314,19 @@ export const providersApi = {
       app: appId,
       target,
     });
+  },
+
+  async getRemoteCliVersions(
+    target: SshConnectionTarget,
+  ): Promise<RemoteCliReport> {
+    return await invoke("get_remote_cli_versions", { target });
+  },
+
+  async updateRemoteCli(
+    appId: AppId,
+    target: SshConnectionTarget,
+  ): Promise<RemoteCliUpdateResult> {
+    return await invoke("update_remote_cli", { app: appId, target });
   },
 
   async getRemoteGatewayOverview(): Promise<RemoteGatewayOverview> {

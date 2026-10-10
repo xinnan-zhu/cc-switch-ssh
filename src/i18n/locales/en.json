@@ -2656,6 +2656,27 @@
       "manage": "Open remote management",
       "followLocalShort": "Follow local · {{name}}",
       "indicatorHint": "These servers reach the local gateway through SSH tunnels; keep this machine online."
+    },
+    "cli": {
+      "title": "Remote CLI versions",
+      "description": "Claude Code, Codex, Gemini CLI and Grok Build installed on {{host}}, updated the way they were installed (npm, official installer or Homebrew).",
+      "updatesAvailable": "{{count}} updates",
+      "updateAll": "Update all",
+      "update": "Update",
+      "updating": "Updating",
+      "queued": "Queued",
+      "checking": "Checking remote versions...",
+      "notInstalled": "Not installed",
+      "versionUnknown": "Version unreadable",
+      "currentApp": "current",
+      "sourceNative": "Official",
+      "sourceUnknown": "Unknown source",
+      "manualOnly": "Update manually",
+      "manualHint": "Can't tell how it was installed ({{path}}). Update it on the server.",
+      "updated": "{{app}} updated: {{from}} → {{to}}",
+      "updatedHint": "Running {{app}} processes use the new version after they restart.",
+      "unchanged": "{{app}} update finished; still on {{version}}. It may already be the latest for its install channel.",
+      "updateFailed": "Failed to update {{app}}"
     }
   },
   "mcp": {

@@ -4894,5 +4894,24 @@
       "refresh": "Refresh quota",
       "refreshAria": "Refresh quota for {{login}}"
     }
+  },
+  "remoteUsage": {
+    "title": "Remote usage",
+    "description": "Sync Claude, Codex, Gemini and Grok Build session usage over SSH. Only usage metadata is transferred, never conversations or credentials. Requires Python 3 on the host.",
+    "auto": "Sync every 5 minutes (SSH key login)",
+    "history": "Import all history (default: last 30 days)",
+    "paths": "Custom log directories",
+    "defaultPaths": "Blank uses defaults; one directory per line; ~ supported",
+    "gatewayPolicy": "While the gateway is enabled for this host and app, it owns accounting and session collection skips that period. Session costs are estimates; records without timing have no speed.",
+    "lastSync": "Last sync",
+    "save": "Save settings",
+    "sync": "Sync now",
+    "saved": "Remote usage settings saved",
+    "done": "Imported {{count}}, skipped {{skipped}}",
+    "more": "More records remain. The next sync will continue; you can also sync again now.",
+    "origin": "Usage origin",
+    "allHosts": "Local and all hosts",
+    "local": "Local only",
+    "legacy": "Legacy summaries (unknown origin)"
   }
 }

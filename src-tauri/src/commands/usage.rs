@@ -28,14 +28,16 @@ pub async fn get_usage_summary(
     app_type: Option<String>,
     provider_name: Option<String>,
     model: Option<String>,
+    origin: Option<String>,
 ) -> Result<UsageSummary, AppError> {
     run_db_query(&state, move |db| {
-        db.get_usage_summary(
+        db.get_usage_summary_scoped(
             start_date,
             end_date,
             app_type.as_deref(),
             provider_name.as_deref(),
             model.as_deref(),
+            origin.as_deref(),
         )
     })
     .await
@@ -62,13 +64,15 @@ pub async fn get_usage_summary_by_app(
     end_date: Option<i64>,
     provider_name: Option<String>,
     model: Option<String>,
+    origin: Option<String>,
 ) -> Result<Vec<UsageSummaryByApp>, AppError> {
     run_db_query(&state, move |db| {
-        db.get_usage_summary_by_app(
+        db.get_usage_summary_by_app_scoped(
             start_date,
             end_date,
             provider_name.as_deref(),
             model.as_deref(),
+            origin.as_deref(),
         )
     })
     .await
@@ -83,14 +87,16 @@ pub async fn get_usage_trends(
     app_type: Option<String>,
     provider_name: Option<String>,
     model: Option<String>,
+    origin: Option<String>,
 ) -> Result<Vec<DailyStats>, AppError> {
     run_db_query(&state, move |db| {
-        db.get_daily_trends(
+        db.get_daily_trends_scoped(
             start_date,
             end_date,
             app_type.as_deref(),
             provider_name.as_deref(),
             model.as_deref(),
+            origin.as_deref(),
         )
     })
     .await
@@ -103,12 +109,14 @@ pub async fn get_usage_first_date(
     app_type: Option<String>,
     provider_name: Option<String>,
     model: Option<String>,
+    origin: Option<String>,
 ) -> Result<Option<String>, AppError> {
     run_db_query(&state, move |db| {
-        db.get_first_usage_date(
+        db.get_first_usage_date_scoped(
             app_type.as_deref(),
             provider_name.as_deref(),
             model.as_deref(),
+            origin.as_deref(),
         )
     })
     .await
@@ -123,14 +131,16 @@ pub async fn get_provider_stats(
     app_type: Option<String>,
     provider_name: Option<String>,
     model: Option<String>,
+    origin: Option<String>,
 ) -> Result<Vec<ProviderStats>, AppError> {
     run_db_query(&state, move |db| {
-        db.get_provider_stats(
+        db.get_provider_stats_scoped(
             start_date,
             end_date,
             app_type.as_deref(),
             provider_name.as_deref(),
             model.as_deref(),
+            origin.as_deref(),
         )
     })
     .await
@@ -145,14 +155,16 @@ pub async fn get_model_stats(
     app_type: Option<String>,
     provider_name: Option<String>,
     model: Option<String>,
+    origin: Option<String>,
 ) -> Result<Vec<ModelStats>, AppError> {
     run_db_query(&state, move |db| {
-        db.get_model_stats(
+        db.get_model_stats_scoped(
             start_date,
             end_date,
             app_type.as_deref(),
             provider_name.as_deref(),
             model.as_deref(),
+            origin.as_deref(),
         )
     })
     .await
@@ -396,4 +408,31 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(crate::usage_events::take_test_notify_count(), 1);
     }
+}
+
+#[tauri::command]
+pub async fn get_remote_usage_hosts(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::services::provider::RemoteUsageHost>, AppError> {
+    run_db_query(&state, crate::services::provider::RemoteUsageService::hosts).await
+}
+
+#[tauri::command]
+pub async fn configure_remote_usage(
+    state: State<'_, AppState>,
+    target: crate::services::provider::SshConnectionTarget,
+    config: crate::services::provider::RemoteUsageConfig,
+) -> Result<(), AppError> {
+    run_db_query(&state, move |db| {
+        crate::services::provider::RemoteUsageService::configure(db, &target, config)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn sync_remote_usage(
+    state: State<'_, AppState>,
+    target: crate::services::provider::SshConnectionTarget,
+) -> Result<crate::services::session_usage::SessionSyncResult, AppError> {
+    crate::services::provider::RemoteUsageService::sync(state.db.clone(), target).await
 }

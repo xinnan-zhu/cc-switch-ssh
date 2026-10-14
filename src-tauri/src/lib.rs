@@ -1316,6 +1316,16 @@ pub fn run() {
                     }
                 });
 
+                let remote_usage_db = state.db.clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+                    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    loop {
+                        interval.tick().await;
+                        crate::services::provider::RemoteUsageService::sync_enabled(remote_usage_db.clone()).await;
+                    }
+                });
+
                 // Session log usage sync: 启动时同步一次，之后每 60 秒检查
                 let db_for_session_sync = state.db.clone();
                 tauri::async_runtime::spawn(async move {
@@ -1707,6 +1717,9 @@ pub fn run() {
             commands::record_models_dev_sync_result,
             commands::check_provider_limits,
             // Session usage sync
+            commands::get_remote_usage_hosts,
+            commands::configure_remote_usage,
+            commands::sync_remote_usage,
             commands::sync_session_usage,
             commands::rebuild_codex_usage,
             commands::get_session_usage_last_sync,

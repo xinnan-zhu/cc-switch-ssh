@@ -41,6 +41,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { RemoteUsageCard } from "./RemoteUsageCard";
 import { RemoteCliCard } from "./RemoteCliCard";
 import { RemoteGatewayCard } from "./RemoteGatewayCard";
 import { REMOTE_GATEWAY_OVERVIEW_KEY } from "./RemoteGatewayIndicator";
@@ -1067,6 +1068,14 @@ export function RemoteProviderPage({
           hostLabel={connectedHost}
           appId={appId}
           onRestartProcesses={() => startRestart(connectedTarget)}
+        />
+      )}
+
+      {connectedTarget && remoteQuery.data && (
+        <RemoteUsageCard
+          key={`usage:${connectedTargetKey}`}
+          target={connectedTarget}
+          hostLabel={connectedHost}
         />
       )}
 

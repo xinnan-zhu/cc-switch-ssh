@@ -3,10 +3,10 @@
   "items": [
     {
       "type": "new",
-      "zh": "现在可以在「应用」页安装、更新、卸载编程应用",
-      "zh-TW": "現在可以在「應用」頁安裝、更新、解除安裝編程應用",
-      "en": "Install, update and uninstall coding apps right from the Apps page",
-      "ja": "「アプリ」ページでコーディングツールのインストール・更新・アンインストールが可能に"
+      "zh": "SSH 远端用量增量同步，支持按主机查看统计",
+      "zh-TW": "SSH 遠端用量增量同步，支援依主機查看統計",
+      "en": "Sync remote session usage over SSH and filter statistics by host",
+      "ja": "SSH でリモート使用量を同期し、ホスト別に集計"
     },
     {
       "type": "improve",

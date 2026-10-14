@@ -4895,5 +4895,24 @@
       "refresh": "重新整理額度",
       "refreshAria": "重新整理 {{login}} 的額度"
     }
+  },
+  "remoteUsage": {
+    "title": "遠端用量統計",
+    "description": "透過 SSH 同步 Claude、Codex、Gemini 和 Grok Build 工作階段用量。僅傳輸用量中繼資料，不傳輸對話或憑證。遠端需要 Python 3。",
+    "auto": "每 5 分鐘自動同步（SSH 金鑰登入）",
+    "history": "匯入全部歷史（預設最近 30 天）",
+    "paths": "自訂日誌目錄",
+    "defaultPaths": "留空使用預設目錄；每行一個目錄，可用 ~",
+    "gatewayPolicy": "同一主機與應用啟用本機閘道期間，由閘道記帳，工作階段採集跳過該時段。費用為估算；缺少計時的記錄不顯示速度。",
+    "lastSync": "上次同步",
+    "save": "儲存設定",
+    "sync": "立即同步",
+    "saved": "遠端用量設定已儲存",
+    "done": "匯入 {{count}} 筆，略過 {{skipped}} 筆",
+    "more": "仍有未讀記錄，下次同步會繼續，也可立即再次同步。",
+    "origin": "統計來源",
+    "allHosts": "本機與全部遠端",
+    "local": "僅本機",
+    "legacy": "舊版歷史彙總（來源未知）"
   }
 }

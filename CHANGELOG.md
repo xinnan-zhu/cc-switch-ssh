@@ -5,6 +5,14 @@ All notable changes to CC Switch will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.11-ssh.1] - 2026-10-14
+
+- Merge upstream stable v4.0.11 while preserving SSH switching, gateway, auth fixes and remote CLI updates.
+- Collect Claude, Codex, Gemini and Grok Build session usage over SSH, with metadata-only transfer, durable cursors and deduplication, manual sync and per-host automatic sync.
+- Filter usage totals, cache rates, trends and request history by local or SSH host origin; preserve origin in daily rollups (schema 21).
+- Include precisely timed remote gateway requests in speed statistics; session records without timing keep speed unknown.
+- Preserve remote collection state during configuration sync. Legacy rollups remain visible with unknown origin.
+
 ## [4.0.11] - 2026-10-13
 
 This release adds uninstall to the Apps page, so coding clients can now be installed, updated and uninstalled from CC Switch. The Apps page removes a detected client installation after showing the exact path and command, and lists manual uninstall commands for every install method. Coding-plan quota queries are enabled by default for every app, both when adding a provider and when importing a link. Codex usage import no longer rereads deferred fork rollouts every minute and now resolves fork parents across paginated Codex Desktop rollouts. Fixes cover install and update commands losing the user PATH after an MSI auto-restart on Windows, full-screen panels flickering, and bulk Skills and MCP toggles reporting success when writes failed. New presets: StreamLake China, AIComing, SoruxGPT Coding Plan and GrooRoute Pro.

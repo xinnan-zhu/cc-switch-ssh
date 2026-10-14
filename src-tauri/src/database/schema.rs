@@ -278,6 +278,7 @@ impl Database {
         // 否则明细被 prune 后接管计费不可审计；历史行迁移时填 ''（未知）。
         conn.execute(
             "CREATE TABLE IF NOT EXISTS usage_daily_rollups (
+                data_source TEXT NOT NULL DEFAULT 'proxy',
                 date TEXT NOT NULL,
                 app_type TEXT NOT NULL,
                 provider_id TEXT NOT NULL,
@@ -293,7 +294,7 @@ impl Database {
                 input_token_semantics INTEGER NOT NULL DEFAULT 0,
                 total_cost_usd TEXT NOT NULL DEFAULT '0',
                 avg_latency_ms INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (date, app_type, provider_id, model, request_model, pricing_model)
+                PRIMARY KEY (date, app_type, provider_id, model, request_model, pricing_model, data_source)
             )",
             [],
         )
@@ -313,7 +314,20 @@ impl Database {
         // cc-switch-ssh: SSH hosts that reach the local proxy through a reverse
         // tunnel, and which provider each app on that host is routed to.
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS remote_gateways (
+            "CREATE TABLE IF NOT EXISTS remote_usage_hosts (
+                host_key TEXT PRIMARY KEY, target_json TEXT NOT NULL, config_json TEXT NOT NULL,
+                since_at INTEGER NOT NULL, cursors_json TEXT NOT NULL DEFAULT '{}',
+                last_sync_at INTEGER, last_error TEXT
+            );
+            CREATE TABLE IF NOT EXISTS remote_usage_gateway_ids (
+                host_key TEXT NOT NULL, app_type TEXT NOT NULL, message_id TEXT NOT NULL,
+                PRIMARY KEY(host_key, app_type, message_id)
+            );
+            CREATE TABLE IF NOT EXISTS remote_usage_gateway_windows (
+                host_key TEXT NOT NULL, app_type TEXT NOT NULL, start_at INTEGER NOT NULL, end_at INTEGER,
+                PRIMARY KEY(host_key, app_type, start_at)
+            );
+            CREATE TABLE IF NOT EXISTS remote_gateways (
                 host_key TEXT PRIMARY KEY,
                 target_json TEXT NOT NULL,
                 remote_port INTEGER NOT NULL,
@@ -607,6 +621,36 @@ impl Database {
                             )?;
                         }
                         Self::set_user_version(conn, 20)?;
+                    }
+
+                    20 => {
+                        if Self::table_exists(conn, "usage_daily_rollups")?
+                            && !Self::has_column(conn, "usage_daily_rollups", "data_source")?
+                        {
+                            conn.execute_batch("ALTER TABLE usage_daily_rollups RENAME TO usage_daily_rollups_v20;
+                            CREATE TABLE IF NOT EXISTS usage_daily_rollups (
+                data_source TEXT NOT NULL DEFAULT 'proxy',
+                date TEXT NOT NULL,
+                app_type TEXT NOT NULL,
+                provider_id TEXT NOT NULL,
+                model TEXT NOT NULL,
+                request_model TEXT NOT NULL DEFAULT '',
+                pricing_model TEXT NOT NULL DEFAULT '',
+                request_count INTEGER NOT NULL DEFAULT 0,
+                success_count INTEGER NOT NULL DEFAULT 0,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+                input_token_semantics INTEGER NOT NULL DEFAULT 0,
+                total_cost_usd TEXT NOT NULL DEFAULT '0',
+                avg_latency_ms INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (date, app_type, provider_id, model, request_model, pricing_model, data_source)
+            );
+                            INSERT INTO usage_daily_rollups (data_source, date, app_type, provider_id, model, request_model, pricing_model, request_count, success_count, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, input_token_semantics, total_cost_usd, avg_latency_ms) SELECT 'legacy', date, app_type, provider_id, model, request_model, pricing_model, request_count, success_count, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, input_token_semantics, total_cost_usd, avg_latency_ms FROM usage_daily_rollups_v20;
+                            DROP TABLE usage_daily_rollups_v20;")?;
+                        }
+                        Self::set_user_version(conn, 21)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -3785,9 +3829,18 @@ mod tests {
             [],
         )?;
         conn.execute(
-            "CREATE TABLE usage_daily_rollups (date TEXT PRIMARY KEY)",
+            "CREATE TABLE usage_daily_rollups (
+                date TEXT NOT NULL, app_type TEXT NOT NULL, provider_id TEXT NOT NULL, model TEXT NOT NULL,
+                request_model TEXT NOT NULL DEFAULT '', pricing_model TEXT NOT NULL DEFAULT '',
+                request_count INTEGER NOT NULL DEFAULT 0, success_count INTEGER NOT NULL DEFAULT 0,
+                input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+                total_cost_usd TEXT NOT NULL DEFAULT '0', avg_latency_ms INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(date, app_type, provider_id, model, request_model, pricing_model)
+            )",
             [],
         )?;
+        conn.execute("INSERT INTO usage_daily_rollups(date,app_type,provider_id,model,request_count,total_cost_usd) VALUES('2026-09-01','codex','p1','gpt-5',12,'3.25')", [])?;
         Database::set_user_version(&conn, 12)?;
 
         Database::apply_schema_migrations_on_conn(&conn)?;
@@ -3810,6 +3863,12 @@ mod tests {
             |row| row.get(0),
         )?;
         assert_eq!(log_default, 1);
+        let preserved: (String, i64, String) = conn.query_row(
+            "SELECT data_source, request_count, total_cost_usd FROM usage_daily_rollups",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        assert_eq!(preserved, ("legacy".into(), 12, "3.25".into()));
 
         Ok(())
     }

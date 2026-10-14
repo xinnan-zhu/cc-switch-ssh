@@ -1508,7 +1508,11 @@ fn hide_ssh_console_window(command: &mut Command) {
 #[cfg(not(windows))]
 fn hide_ssh_console_window(_command: &mut Command) {}
 
-fn configure_ssh_command(command: &mut Command, target: &ResolvedSshTarget, remote_command: &str) {
+pub(super) fn configure_ssh_command(
+    command: &mut Command,
+    target: &ResolvedSshTarget,
+    remote_command: &str,
+) {
     command.arg("-C");
     command.args(["-o", "ConnectTimeout=10", "-o", "ClearAllForwardings=yes"]);
     if let Some(port) = target.port {

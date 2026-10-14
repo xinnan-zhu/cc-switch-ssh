@@ -4894,5 +4894,24 @@
       "refresh": "刷新额度",
       "refreshAria": "刷新 {{login}} 的额度"
     }
+  },
+  "remoteUsage": {
+    "title": "远端用量统计",
+    "description": "通过 SSH 同步 Claude、Codex、Gemini 和 Grok Build 会话用量。仅传输时间、模型和 token 等元数据，不读取认证文件或传输对话。远端需要 Python 3。",
+    "auto": "每 5 分钟自动同步（SSH 密钥登录）",
+    "history": "导入全部历史（默认最近 30 天）",
+    "paths": "自定义日志目录",
+    "defaultPaths": "留空使用默认目录；每行一个目录，可用 ~",
+    "gatewayPolicy": "同一主机和应用启用本地网关期间，由网关负责记账，会话采集跳过该时段。会话费用为估算，缺少计时的记录不显示速率。",
+    "lastSync": "上次同步",
+    "save": "保存设置",
+    "sync": "立即同步",
+    "saved": "远端用量设置已保存",
+    "done": "导入 {{count}} 条，跳过 {{skipped}} 条",
+    "more": "尚有未读记录，下次同步会继续；也可再次点击立即同步。",
+    "origin": "统计来源",
+    "allHosts": "本机和全部远端",
+    "local": "仅本机",
+    "legacy": "旧版历史汇总（来源未知）"
   }
 }

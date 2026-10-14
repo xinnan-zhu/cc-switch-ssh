@@ -1,3 +1,5 @@
+import { UsageOriginContext } from "@/lib/query/usageOrigin";
+import { remoteUsageApi } from "@/lib/api/remoteUsage";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -161,6 +163,12 @@ export function UsageDashboard({
     preset: "today",
   });
   const [appType, setAppType] = useState<AppTypeFilter>(initialAppType);
+  const [origin, setOrigin] = useState<string | undefined>(undefined);
+  const { data: remoteHosts = [] } = useQuery({
+    queryKey: ["remoteUsageHosts"],
+    queryFn: remoteUsageApi.hosts,
+    refetchInterval: 30000,
+  });
   const [providerName, setProviderName] = useState<string | undefined>(
     undefined,
   );
@@ -314,12 +322,12 @@ export function UsageDashboard({
   };
   const { data: providerOptionsData } = useProviderStats(
     range,
-    { appType },
+    { appType, origin },
     refetch,
   );
   const { data: modelOptionsData } = useModelStats(
     range,
-    { appType, providerName },
+    { appType, providerName, origin },
     refetch,
   );
   // 有没有任何用量（不分时间范围）：一条都没有时显示空状态
@@ -822,8 +830,33 @@ export function UsageDashboard({
         }
         actions={headerActions}
       />
+      <div className="px-6 py-1">
+        <label className="flex items-center gap-2 text-caption text-fg-2">
+          {t("remoteUsage.origin")}
+          <select
+            className="rounded-control border border-border bg-surface px-2 py-1"
+            value={origin ?? "all"}
+            onChange={(e) => {
+              setOrigin(e.target.value === "all" ? undefined : e.target.value);
+              setProviderName(undefined);
+              setModel(undefined);
+            }}
+          >
+            <option value="all">{t("remoteUsage.allHosts")}</option>
+            <option value="local">{t("remoteUsage.local")}</option>
+            <option value="legacy">{t("remoteUsage.legacy")}</option>
+            {remoteHosts.map((h) => (
+              <option key={h.hostKey} value={`host:${h.hostKey}`}>
+                {h.hostKey}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
       {filterRow}
-      {body}
+      <UsageOriginContext.Provider value={origin}>
+        {body}
+      </UsageOriginContext.Provider>
 
       <RequestDetailPanel
         requestId={detailRequestId}

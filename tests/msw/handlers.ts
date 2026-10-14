@@ -490,6 +490,7 @@ export const handlers = [
   http.post(`${TAURI_ENDPOINT}/get_circuit_breaker_stats`, () => success(null)),
 
   // 侧栏：今日花费、授权中心提醒；「应用」页：Claude Desktop 接入状态
+  http.post(`${TAURI_ENDPOINT}/get_remote_usage_hosts`, () => success([])),
   http.post(`${TAURI_ENDPOINT}/get_usage_summary`, () =>
     success({
       totalRequests: 0,

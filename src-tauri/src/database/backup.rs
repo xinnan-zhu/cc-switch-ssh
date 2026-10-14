@@ -93,6 +93,9 @@ const SYNC_SKIP_TABLES: &[&str] = &[
     "session_usage_dedup",
     "remote_gateways",
     "remote_gateway_routes",
+    "remote_usage_hosts",
+    "remote_usage_gateway_ids",
+    "remote_usage_gateway_windows",
 ];
 
 /// Tables whose local data is preserved from the live database during WebDAV import.
@@ -106,6 +109,9 @@ const SYNC_PRESERVE_TABLES: &[&str] = &[
     "session_usage_dedup",
     "remote_gateways",
     "remote_gateway_routes",
+    "remote_usage_hosts",
+    "remote_usage_gateway_ids",
+    "remote_usage_gateway_windows",
 ];
 
 /// A database backup entry for the UI

@@ -51,7 +51,7 @@ use std::sync::Mutex;
 
 /// 当前 Schema 版本号
 /// 每次修改表结构时递增，并在 schema.rs 中添加相应的迁移逻辑
-pub(crate) const SCHEMA_VERSION: i32 = 20;
+pub(crate) const SCHEMA_VERSION: i32 = 21;
 
 /// 安全地序列化 JSON，避免 unwrap panic
 pub(crate) fn to_json_string<T: Serialize>(value: &T) -> Result<String, AppError> {
@@ -141,6 +141,12 @@ impl Database {
         }
 
         db.apply_schema_migrations()?;
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute("INSERT OR IGNORE INTO remote_usage_gateway_windows(host_key, app_type, start_at)
+                SELECT g.host_key, r.app_type, g.created_at FROM remote_gateways g JOIN remote_gateway_routes r ON g.host_key=r.host_key
+                WHERE r.enabled=1 AND NOT EXISTS(SELECT 1 FROM remote_usage_gateway_windows w WHERE w.host_key=g.host_key AND w.app_type=r.app_type)", [])?;
+        }
         if let Err(e) = db.ensure_incremental_auto_vacuum() {
             log::warn!("Failed to ensure incremental auto-vacuum: {e}");
         }

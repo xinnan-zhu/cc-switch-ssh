@@ -244,7 +244,17 @@ fn save_route(
     enabled: bool,
     provider_id: Option<&str>,
 ) -> Result<(), AppError> {
-    let conn = crate::database::lock_conn!(db.conn);
+    let mut conn = crate::database::lock_conn!(db.conn);
+    let conn = conn.transaction()?;
+    let now = chrono::Utc::now().timestamp();
+    if enabled {
+        conn.execute("INSERT OR IGNORE INTO remote_usage_gateway_windows(host_key, app_type, start_at)
+            SELECT ?1, ?2, ?3 WHERE NOT EXISTS(SELECT 1 FROM remote_usage_gateway_windows WHERE host_key=?1 AND app_type=?2 AND end_at IS NULL)",
+            rusqlite::params![host_key, app.as_str(), now])?;
+    } else {
+        conn.execute("UPDATE remote_usage_gateway_windows SET end_at=?3 WHERE host_key=?1 AND app_type=?2 AND end_at IS NULL",
+            rusqlite::params![host_key, app.as_str(), now])?;
+    }
     conn.execute(
         "INSERT INTO remote_gateway_routes (host_key, app_type, enabled, provider_id)
          VALUES (?1, ?2, ?3, ?4)
@@ -252,6 +262,7 @@ fn save_route(
         rusqlite::params![host_key, app.as_str(), i64::from(enabled), provider_id],
     )
     .map_err(db_err)?;
+    conn.commit()?;
     Ok(())
 }
 

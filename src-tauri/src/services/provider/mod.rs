@@ -24,6 +24,7 @@ mod pi;
 mod remote;
 mod remote_cli;
 mod remote_gateway;
+mod remote_usage;
 mod usage;
 
 use indexmap::IndexMap;
@@ -52,6 +53,7 @@ pub use remote_cli::{RemoteCliReport, RemoteCliService, RemoteCliUpdateResult};
 pub use remote_gateway::{
     RemoteGatewayApplyResult, RemoteGatewayOverview, RemoteGatewayService, RemoteGatewayState,
 };
+pub use remote_usage::{RemoteUsageConfig, RemoteUsageHost, RemoteUsageService};
 
 pub fn import_pi_providers_from_live(state: &AppState) -> Result<usize, AppError> {
     pi::import_from_live(state)

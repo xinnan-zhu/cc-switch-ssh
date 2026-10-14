@@ -1,3 +1,4 @@
+import { useUsageOrigin } from "./usageOrigin";
 import {
   keepPreviousData,
   useQuery,
@@ -35,6 +36,7 @@ type RequestLogsKey = {
   liveEndTime?: boolean;
   appType?: string;
   providerName?: string;
+  origin?: string;
   model?: string;
   statusCode?: number;
 };
@@ -59,12 +61,13 @@ export const usageKeys = {
       filters?.appType ?? null,
       filters?.providerName ?? null,
       filters?.model ?? null,
+      filters?.origin ?? null,
     ] as const,
   summaryByApp: (
     preset: UsageRangeSelection["preset"],
     customStartDate: number | undefined,
     customEndDate: number | undefined,
-    filters?: Pick<UsageScopeFilters, "providerName" | "model">,
+    filters?: Pick<UsageScopeFilters, "providerName" | "model" | "origin">,
     liveEndTime?: boolean,
   ) =>
     [
@@ -76,6 +79,7 @@ export const usageKeys = {
       liveEndTime ?? false,
       filters?.providerName ?? null,
       filters?.model ?? null,
+      filters?.origin ?? null,
     ] as const,
   trends: (
     preset: UsageRangeSelection["preset"],
@@ -94,6 +98,7 @@ export const usageKeys = {
       filters?.appType ?? null,
       filters?.providerName ?? null,
       filters?.model ?? null,
+      filters?.origin ?? null,
     ] as const,
   firstDate: (filters?: UsageScopeFilters) =>
     [
@@ -102,6 +107,7 @@ export const usageKeys = {
       filters?.appType ?? null,
       filters?.providerName ?? null,
       filters?.model ?? null,
+      filters?.origin ?? null,
     ] as const,
   providerStats: (
     preset: UsageRangeSelection["preset"],
@@ -120,6 +126,7 @@ export const usageKeys = {
       filters?.appType ?? null,
       filters?.providerName ?? null,
       filters?.model ?? null,
+      filters?.origin ?? null,
     ] as const,
   modelStats: (
     preset: UsageRangeSelection["preset"],
@@ -138,6 +145,7 @@ export const usageKeys = {
       filters?.appType ?? null,
       filters?.providerName ?? null,
       filters?.model ?? null,
+      filters?.origin ?? null,
     ] as const,
   logs: (key: RequestLogsKey, page: number, pageSize: number) =>
     [
@@ -150,6 +158,7 @@ export const usageKeys = {
       key.appType ?? "",
       key.providerName ?? "",
       key.model ?? "",
+      key.origin ?? "",
       key.statusCode ?? -1,
       page,
       pageSize,
@@ -171,6 +180,7 @@ function normalizeScopeFilters(filters?: UsageScopeFilters): UsageScopeFilters {
     appType: filters?.appType === "all" ? undefined : filters?.appType,
     providerName: filters?.providerName,
     model: filters?.model,
+    origin: filters?.origin,
   };
 }
 
@@ -182,7 +192,11 @@ export function useUsageSummary(
   filters?: UsageScopeFilters,
   options?: UsageQueryOptions,
 ) {
-  const effective = normalizeScopeFilters(filters);
+  const origin = useUsageOrigin();
+  const effective = normalizeScopeFilters({
+    ...filters,
+    origin: filters?.origin ?? origin,
+  });
   return useQuery({
     queryKey: usageKeys.summary(
       range.preset,
@@ -199,6 +213,7 @@ export function useUsageSummary(
         effective.appType,
         effective.providerName,
         effective.model,
+        effective.origin,
       );
     },
     placeholderData: keepPreviousData,
@@ -209,9 +224,11 @@ export function useUsageSummary(
 
 export function useUsageSummaryByApp(
   range: UsageRangeSelection,
-  filters?: Pick<UsageScopeFilters, "providerName" | "model">,
+  filters?: Pick<UsageScopeFilters, "providerName" | "model" | "origin">,
   options?: UsageQueryOptions,
 ) {
+  const origin = useUsageOrigin();
+  filters = { ...filters, origin: filters?.origin ?? origin };
   return useQuery({
     queryKey: usageKeys.summaryByApp(
       range.preset,
@@ -227,6 +244,7 @@ export function useUsageSummaryByApp(
         endDate,
         filters?.providerName,
         filters?.model,
+        filters?.origin,
       );
     },
     placeholderData: keepPreviousData,
@@ -240,7 +258,11 @@ export function useUsageTrends(
   filters?: UsageScopeFilters,
   options?: UsageQueryOptions,
 ) {
-  const effective = normalizeScopeFilters(filters);
+  const origin = useUsageOrigin();
+  const effective = normalizeScopeFilters({
+    ...filters,
+    origin: filters?.origin ?? origin,
+  });
   return useQuery({
     queryKey: usageKeys.trends(
       range.preset,
@@ -257,6 +279,7 @@ export function useUsageTrends(
         effective.appType,
         effective.providerName,
         effective.model,
+        effective.origin,
       );
     },
     enabled: options?.enabled ?? true,
@@ -271,7 +294,11 @@ export function useUsageFirstDate(
   filters?: UsageScopeFilters,
   options?: UsageQueryOptions,
 ) {
-  const effective = normalizeScopeFilters(filters);
+  const origin = useUsageOrigin();
+  const effective = normalizeScopeFilters({
+    ...filters,
+    origin: filters?.origin ?? origin,
+  });
   return useQuery({
     queryKey: usageKeys.firstDate(effective),
     queryFn: () =>
@@ -279,6 +306,7 @@ export function useUsageFirstDate(
         effective.appType,
         effective.providerName,
         effective.model,
+        effective.origin,
       ),
     placeholderData: keepPreviousData,
     refetchInterval: options?.refetchInterval ?? DEFAULT_REFETCH_INTERVAL_MS,
@@ -291,7 +319,11 @@ export function useProviderStats(
   filters?: UsageScopeFilters,
   options?: UsageQueryOptions,
 ) {
-  const effective = normalizeScopeFilters(filters);
+  const origin = useUsageOrigin();
+  const effective = normalizeScopeFilters({
+    ...filters,
+    origin: filters?.origin ?? origin,
+  });
   return useQuery({
     queryKey: usageKeys.providerStats(
       range.preset,
@@ -308,6 +340,7 @@ export function useProviderStats(
         effective.appType,
         effective.providerName,
         effective.model,
+        effective.origin,
       );
     },
     placeholderData: keepPreviousData,
@@ -321,7 +354,11 @@ export function useModelStats(
   filters?: UsageScopeFilters,
   options?: UsageQueryOptions,
 ) {
-  const effective = normalizeScopeFilters(filters);
+  const origin = useUsageOrigin();
+  const effective = normalizeScopeFilters({
+    ...filters,
+    origin: filters?.origin ?? origin,
+  });
   return useQuery({
     queryKey: usageKeys.modelStats(
       range.preset,
@@ -338,6 +375,7 @@ export function useModelStats(
         effective.appType,
         effective.providerName,
         effective.model,
+        effective.origin,
       );
     },
     placeholderData: keepPreviousData,
@@ -353,6 +391,8 @@ export function useRequestLogs({
   pageSize = 20,
   options,
 }: RequestLogsQueryArgs) {
+  const origin = useUsageOrigin();
+  filters = { ...filters, origin: filters.origin ?? origin };
   const key: RequestLogsKey = {
     preset: range.preset,
     customStartDate: range.customStartDate,
@@ -361,6 +401,7 @@ export function useRequestLogs({
     appType: filters.appType,
     providerName: filters.providerName,
     model: filters.model,
+    origin: filters.origin,
     statusCode: filters.statusCode,
   };
 

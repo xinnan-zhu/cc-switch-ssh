@@ -130,6 +130,12 @@ impl<'a> UsageLogger<'a> {
         let log_data_source =
             crate::proxy::remote_gateway::session_source(log.session_id.as_deref())
                 .unwrap_or_else(|| "proxy".to_string());
+        if let Some(host) = log_data_source.strip_prefix("remote:") {
+            if let Some(message_id) = log.usage.message_id.as_deref() {
+                conn.execute("INSERT OR IGNORE INTO remote_usage_gateway_ids(host_key, app_type, message_id) VALUES(?1, ?2, ?3)",
+                    rusqlite::params![host, log.app_type, message_id])?;
+            }
+        }
         let existing = Self::load_existing_semantic(&conn, &log.request_id)?;
 
         let (request_id, replace_session_log, collision) = match existing {

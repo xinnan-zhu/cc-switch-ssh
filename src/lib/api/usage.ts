@@ -56,6 +56,7 @@ export const usageApi = {
     appType?: string,
     providerName?: string,
     model?: string,
+    origin?: string,
   ): Promise<UsageSummary> => {
     return invoke("get_usage_summary", {
       startDate,
@@ -63,6 +64,7 @@ export const usageApi = {
       appType,
       providerName,
       model,
+      origin,
     });
   },
 
@@ -78,12 +80,14 @@ export const usageApi = {
     endDate?: number,
     providerName?: string,
     model?: string,
+    origin?: string,
   ): Promise<UsageSummaryByApp[]> => {
     return invoke("get_usage_summary_by_app", {
       startDate,
       endDate,
       providerName,
       model,
+      origin,
     });
   },
 
@@ -93,6 +97,7 @@ export const usageApi = {
     appType?: string,
     providerName?: string,
     model?: string,
+    origin?: string,
   ): Promise<DailyStats[]> => {
     return invoke("get_usage_trends", {
       startDate,
@@ -100,6 +105,7 @@ export const usageApi = {
       appType,
       providerName,
       model,
+      origin,
     });
   },
 
@@ -108,11 +114,13 @@ export const usageApi = {
     appType?: string,
     providerName?: string,
     model?: string,
+    origin?: string,
   ): Promise<string | null> => {
     return invoke("get_usage_first_date", {
       appType,
       providerName,
       model,
+      origin,
     });
   },
 
@@ -122,6 +130,7 @@ export const usageApi = {
     appType?: string,
     providerName?: string,
     model?: string,
+    origin?: string,
   ): Promise<ProviderStats[]> => {
     return invoke("get_provider_stats", {
       startDate,
@@ -129,6 +138,7 @@ export const usageApi = {
       appType,
       providerName,
       model,
+      origin,
     });
   },
 
@@ -138,6 +148,7 @@ export const usageApi = {
     appType?: string,
     providerName?: string,
     model?: string,
+    origin?: string,
   ): Promise<ModelStats[]> => {
     return invoke("get_model_stats", {
       startDate,
@@ -145,6 +156,7 @@ export const usageApi = {
       appType,
       providerName,
       model,
+      origin,
     });
   },
 

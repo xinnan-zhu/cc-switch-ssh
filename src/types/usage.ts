@@ -155,6 +155,8 @@ export interface ModelStats {
 }
 
 export interface LogFilters {
+  /** undefined = all; local = this computer; otherwise SSH host key */
+  origin?: string;
   appType?: string;
   providerName?: string;
   model?: string;
@@ -172,6 +174,8 @@ export interface LogFilters {
  *   与模型统计的分组口径一致）。
  */
 export interface UsageScopeFilters {
+  /** undefined = all; local = this computer; otherwise SSH host key */
+  origin?: string;
   appType?: string;
   providerName?: string;
   model?: string;

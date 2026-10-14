@@ -156,7 +156,7 @@ pub const SPEED_MIN_GENERATION_MS: i64 = 100;
 fn speed_eligible_sql(alias: &str) -> String {
     let data_source = data_source_expr(alias);
     format!(
-        "{data_source} = 'proxy' AND {alias}.first_token_ms IS NOT NULL \
+        "({data_source} = 'proxy' OR {data_source} LIKE 'remote:%') AND {alias}.first_token_ms IS NOT NULL \
          AND {alias}.output_tokens >= {SPEED_MIN_OUTPUT_TOKENS} \
          AND {alias}.latency_ms - {alias}.first_token_ms >= {SPEED_MIN_GENERATION_MS}"
     )
@@ -187,7 +187,7 @@ fn speed_estimate_eligible_sql(alias: &str) -> String {
 fn first_token_eligible_sql(alias: &str) -> String {
     let data_source = data_source_expr(alias);
     format!(
-        "{data_source} = 'proxy' AND {alias}.first_token_ms IS NOT NULL \
+        "({data_source} = 'proxy' OR {data_source} LIKE 'remote:%') AND {alias}.first_token_ms IS NOT NULL \
          AND {alias}.status_code >= 200 AND {alias}.status_code < 300"
     )
 }
@@ -197,7 +197,7 @@ fn first_token_eligible_sql(alias: &str) -> String {
 /// 组装请求的时间，系统性偏高。
 fn est_first_token_eligible_sql(alias: &str) -> String {
     let data_source = data_source_expr(alias);
-    format!("{data_source} <> 'proxy' AND {alias}.first_token_ms IS NOT NULL")
+    format!("{data_source} <> 'proxy' AND {data_source} NOT LIKE 'remote:%' AND {alias}.first_token_ms IS NOT NULL")
 }
 
 /// 按分组键取首字时间的中位数（毫秒）。首字时间长尾明显，偶尔一次排队就是十几秒，
@@ -277,6 +277,7 @@ pub struct LogFilters {
     pub app_type: Option<String>,
     pub provider_name: Option<String>,
     pub model: Option<String>,
+    pub origin: Option<String>,
     pub status_code: Option<u16>,
     pub start_date: Option<i64>,
     pub end_date: Option<i64>,
@@ -461,7 +462,9 @@ fn push_provider_model_filters(
     provider_alias: &str,
     provider_name: Option<&str>,
     model: Option<&str>,
+    origin: Option<&str>,
 ) {
+    push_origin_filter(conditions, params, log_alias, origin);
     if let Some(name) = provider_name {
         conditions.push(format!(
             "{} = ?",
@@ -472,6 +475,26 @@ fn push_provider_model_filters(
     if let Some(m) = model {
         conditions.push(format!("{} = ?", effective_model_sql(log_alias)));
         params.push(Box::new(m.to_string()));
+    }
+}
+
+/// Host origin is independent of collection kind. Works on details and rollups.
+fn push_origin_filter(
+    conditions: &mut Vec<String>,
+    params: &mut Vec<Box<dyn rusqlite::ToSql>>,
+    alias: &str,
+    origin: Option<&str>,
+) {
+    match origin {
+        None | Some("all") => {},
+        Some("legacy") => conditions.push(format!("{alias}.data_source = 'legacy'")),
+        Some("local") => conditions.push(format!("COALESCE({alias}.data_source, 'proxy') NOT LIKE 'remote:%' AND COALESCE({alias}.data_source, 'proxy') NOT LIKE 'remote_session:%' AND COALESCE({alias}.data_source, 'proxy') <> 'legacy'")),
+        Some(host) => {
+            let host = host.strip_prefix("host:").unwrap_or(host);
+            conditions.push(format!("({alias}.data_source = ? OR {alias}.data_source = ? || ':' || {alias}.app_type)"));
+            params.push(Box::new(format!("remote:{host}")));
+            params.push(Box::new(format!("remote_session:{host}")));
+        }
     }
 }
 
@@ -630,12 +653,13 @@ fn connection_total_changes(conn: &Connection) -> Result<u64, AppError> {
 
 fn log_count_cache_key(filters: &LogFilters) -> String {
     format!(
-        "{:?}|{:?}|{:?}|{:?}|{:?}",
+        "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
         filters.app_type,
         filters.provider_name,
         filters.model,
         filters.status_code,
-        filters.start_date
+        filters.start_date,
+        filters.origin
     )
 }
 
@@ -947,6 +971,18 @@ impl Database {
         provider_name: Option<&str>,
         model: Option<&str>,
     ) -> Result<UsageSummary, AppError> {
+        self.get_usage_summary_scoped(start_date, end_date, app_type, provider_name, model, None)
+    }
+
+    pub fn get_usage_summary_scoped(
+        &self,
+        start_date: Option<i64>,
+        end_date: Option<i64>,
+        app_type: Option<&str>,
+        provider_name: Option<&str>,
+        model: Option<&str>,
+        origin: Option<&str>,
+    ) -> Result<UsageSummary, AppError> {
         let conn = lock_conn!(self.conn);
 
         // Build detail WHERE clause
@@ -974,6 +1010,7 @@ impl Database {
             "p",
             provider_name,
             model,
+            origin,
         );
 
         let where_clause = if conditions.is_empty() {
@@ -1009,6 +1046,7 @@ impl Database {
             "p2",
             provider_name,
             model,
+            origin,
         );
 
         let rollup_where = if rollup_conditions.is_empty() {
@@ -1112,6 +1150,17 @@ impl Database {
         provider_name: Option<&str>,
         model: Option<&str>,
     ) -> Result<Vec<UsageSummaryByApp>, AppError> {
+        self.get_usage_summary_by_app_scoped(start_date, end_date, provider_name, model, None)
+    }
+
+    pub fn get_usage_summary_by_app_scoped(
+        &self,
+        start_date: Option<i64>,
+        end_date: Option<i64>,
+        provider_name: Option<&str>,
+        model: Option<&str>,
+        origin: Option<&str>,
+    ) -> Result<Vec<UsageSummaryByApp>, AppError> {
         let conn = lock_conn!(self.conn);
 
         let mut detail_conditions = vec![effective_usage_log_filter_for_range(
@@ -1133,6 +1182,7 @@ impl Database {
             "p",
             provider_name,
             model,
+            origin,
         );
         let detail_where = format!("WHERE {}", detail_conditions.join(" AND "));
         let detail_join = if provider_name.is_some() {
@@ -1157,6 +1207,7 @@ impl Database {
             "p2",
             provider_name,
             model,
+            origin,
         );
         let rollup_where = if rollup_conditions.is_empty() {
             String::new()
@@ -1278,6 +1329,18 @@ impl Database {
         provider_name: Option<&str>,
         model: Option<&str>,
     ) -> Result<Vec<DailyStats>, AppError> {
+        self.get_daily_trends_scoped(start_date, end_date, app_type, provider_name, model, None)
+    }
+
+    pub fn get_daily_trends_scoped(
+        &self,
+        start_date: Option<i64>,
+        end_date: Option<i64>,
+        app_type: Option<&str>,
+        provider_name: Option<&str>,
+        model: Option<&str>,
+        origin: Option<&str>,
+    ) -> Result<Vec<DailyStats>, AppError> {
         let conn = lock_conn!(self.conn);
 
         let end_ts = end_date.unwrap_or_else(|| Local::now().timestamp());
@@ -1313,6 +1376,7 @@ impl Database {
                 "p",
                 provider_name,
                 model,
+                origin,
             );
             let extra_filter = extra_conditions
                 .iter()
@@ -1427,6 +1491,7 @@ impl Database {
             "p",
             provider_name,
             model,
+            origin,
         );
         let extra_filter = extra_conditions
             .iter()
@@ -1511,6 +1576,7 @@ impl Database {
             "p2",
             provider_name,
             model,
+            origin,
         );
 
         let rollup_where = if rollup_conditions.is_empty() {
@@ -1621,6 +1687,16 @@ impl Database {
         provider_name: Option<&str>,
         model: Option<&str>,
     ) -> Result<Option<String>, AppError> {
+        self.get_first_usage_date_scoped(app_type, provider_name, model, None)
+    }
+
+    pub fn get_first_usage_date_scoped(
+        &self,
+        app_type: Option<&str>,
+        provider_name: Option<&str>,
+        model: Option<&str>,
+        origin: Option<&str>,
+    ) -> Result<Option<String>, AppError> {
         let conn = lock_conn!(self.conn);
 
         let mut detail_conditions = Vec::new();
@@ -1636,6 +1712,7 @@ impl Database {
             "p",
             provider_name,
             model,
+            origin,
         );
         let detail_where = if detail_conditions.is_empty() {
             String::new()
@@ -1673,6 +1750,7 @@ impl Database {
             "p2",
             provider_name,
             model,
+            origin,
         );
         let rollup_where = if rollup_conditions.is_empty() {
             String::new()
@@ -1714,6 +1792,18 @@ impl Database {
         provider_name: Option<&str>,
         model: Option<&str>,
     ) -> Result<Vec<ProviderStats>, AppError> {
+        self.get_provider_stats_scoped(start_date, end_date, app_type, provider_name, model, None)
+    }
+
+    pub fn get_provider_stats_scoped(
+        &self,
+        start_date: Option<i64>,
+        end_date: Option<i64>,
+        app_type: Option<&str>,
+        provider_name: Option<&str>,
+        model: Option<&str>,
+        origin: Option<&str>,
+    ) -> Result<Vec<ProviderStats>, AppError> {
         let conn = lock_conn!(self.conn);
 
         let mut detail_conditions = vec![effective_usage_log_filter_for_range(
@@ -1739,6 +1829,7 @@ impl Database {
             "p",
             provider_name,
             model,
+            origin,
         );
         let detail_where = if detail_conditions.is_empty() {
             String::new()
@@ -1766,6 +1857,7 @@ impl Database {
             "p2",
             provider_name,
             model,
+            origin,
         );
         let rollup_where = if rollup_conditions.is_empty() {
             String::new()
@@ -1907,6 +1999,18 @@ impl Database {
         provider_name: Option<&str>,
         model: Option<&str>,
     ) -> Result<Vec<ModelStats>, AppError> {
+        self.get_model_stats_scoped(start_date, end_date, app_type, provider_name, model, None)
+    }
+
+    pub fn get_model_stats_scoped(
+        &self,
+        start_date: Option<i64>,
+        end_date: Option<i64>,
+        app_type: Option<&str>,
+        provider_name: Option<&str>,
+        model: Option<&str>,
+        origin: Option<&str>,
+    ) -> Result<Vec<ModelStats>, AppError> {
         let conn = lock_conn!(self.conn);
 
         let mut detail_conditions = vec![effective_usage_log_filter_for_range(
@@ -1932,6 +2036,7 @@ impl Database {
             "p",
             provider_name,
             model,
+            origin,
         );
         let detail_where = if detail_conditions.is_empty() {
             String::new()
@@ -1964,6 +2069,7 @@ impl Database {
             "p2",
             provider_name,
             model,
+            origin,
         );
         let rollup_where = if rollup_conditions.is_empty() {
             String::new()
@@ -2132,6 +2238,7 @@ impl Database {
             "p",
             filters.provider_name.as_deref(),
             filters.model.as_deref(),
+            filters.origin.as_deref(),
         );
         if let Some(status) = filters.status_code {
             conditions.push("l.status_code = ?".to_string());

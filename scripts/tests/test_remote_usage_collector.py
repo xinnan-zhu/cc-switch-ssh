@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -82,9 +83,18 @@ class RemoteUsageCollectorTest(unittest.TestCase):
         result = collector.collect(self.config)
         self.assertEqual(result["events"][0]["input"], 30)
         self.config["cursors"] = result["cursors"]
-        file.unlink()
+        original_stat = file.stat()
+        # Keep the old inode allocated: unlink + recreate may reuse it on Linux,
+        # in which case identical content correctly resumes at EOF.
+        retired = file.with_suffix(".retired")
+        file.rename(retired)
         self.write("codex", [meta, record])
+        self.assertNotEqual(file.stat().st_ino, retired.stat().st_ino)
+        # Even a replacement preserving size and timestamps must be rescanned.
+        os.utime(file, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
         rewritten = collector.collect(self.config)
+        self.assertEqual(rewritten["errors"], [])
+        self.assertEqual(len(rewritten["events"]), 1)
         self.assertEqual(rewritten["events"][0]["id"], result["events"][0]["id"])
 
     def test_error_keeps_original_cursor_and_has_no_conversation(self):

@@ -196,7 +196,8 @@ def collect(config):
                         stat = file.stat()
                         prior = cursors.get(key, {})
                         scanned += 1
-                        if prior.get("size") == stat.st_size and prior.get("mtime") == stat.st_mtime_ns:
+                        if (prior.get("size") == stat.st_size and prior.get("mtime") == stat.st_mtime_ns
+                                and prior.get("inode") == stat.st_ino):
                             continue
                         with open_log(file, compressed) as stream:
                             offset = prior.get("offset", 0)

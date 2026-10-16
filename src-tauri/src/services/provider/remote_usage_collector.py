@@ -8,6 +8,9 @@ import hashlib
 import json
 import os
 import contextlib
+import ctypes
+import ctypes.util
+import functools
 import io
 import shutil
 import subprocess
@@ -126,6 +129,79 @@ def event(app, ident, session, model, ts, input_tokens, output_tokens, cache_rea
                 cache_1h=cache_1h, upstream_id=upstream_id)
 
 
+class _Buffer(ctypes.Structure):
+    _fields_ = [("data", ctypes.c_void_p), ("size", ctypes.c_size_t), ("pos", ctypes.c_size_t)]
+
+
+@functools.lru_cache(maxsize=None)
+def _libzstd():
+    # libzstd ships with nearly every Linux base system (apt, systemd depend on it)
+    # even when neither the zstd CLI nor the zstandard module is installed.
+    for name in (ctypes.util.find_library("zstd"), "libzstd.so.1", "libzstd.1.dylib"):
+        if not name:
+            continue
+        try:
+            lib = ctypes.CDLL(name)
+        except OSError:
+            continue
+        lib.ZSTD_createDStream.restype = ctypes.c_void_p
+        lib.ZSTD_freeDStream.argtypes = [ctypes.c_void_p]
+        lib.ZSTD_initDStream.argtypes = [ctypes.c_void_p]
+        lib.ZSTD_initDStream.restype = ctypes.c_size_t
+        lib.ZSTD_decompressStream.argtypes = [ctypes.c_void_p, ctypes.POINTER(_Buffer), ctypes.POINTER(_Buffer)]
+        lib.ZSTD_decompressStream.restype = ctypes.c_size_t
+        lib.ZSTD_isError.argtypes = [ctypes.c_size_t]
+        lib.ZSTD_isError.restype = ctypes.c_uint
+        return lib
+    return None
+
+
+class _ZstdReader(io.RawIOBase):
+    def __init__(self, lib, raw):
+        self.lib, self.raw = lib, raw
+        self.stream = lib.ZSTD_createDStream()
+        if not self.stream or lib.ZSTD_isError(lib.ZSTD_initDStream(self.stream)):
+            raise ValueError("zstd init failed")
+        self.chunk = ctypes.create_string_buffer(1 << 17)
+        self.inbuf = _Buffer(ctypes.cast(self.chunk, ctypes.c_void_p), 0, 0)
+        self.pending = 0
+
+    def readable(self):
+        return True
+
+    def readinto(self, target):
+        view = memoryview(target).cast("B")
+        out_data = (ctypes.c_char * len(view)).from_buffer(view)
+        out = _Buffer(ctypes.cast(out_data, ctypes.c_void_p), len(view), 0)
+        while out.pos == 0:
+            if self.inbuf.pos == self.inbuf.size:
+                data = self.raw.read(len(self.chunk))
+                if not data:
+                    if self.pending:
+                        raise ValueError("truncated archive")
+                    return 0
+                ctypes.memmove(self.chunk, data, len(data))
+                self.inbuf.size, self.inbuf.pos = len(data), 0
+            self.pending = self.lib.ZSTD_decompressStream(self.stream, ctypes.byref(out), ctypes.byref(self.inbuf))
+            if self.lib.ZSTD_isError(self.pending):
+                raise ValueError("invalid archive")
+        return out.pos
+
+    def close(self):
+        if self.stream:
+            self.lib.ZSTD_freeDStream(self.stream)
+            self.stream = None
+        super().close()
+
+
+def has_zstd():
+    try:
+        import zstandard  # noqa: F401
+        return True
+    except ImportError:
+        return bool(_libzstd() or shutil.which("zstd"))
+
+
 @contextlib.contextmanager
 def open_log(file, compressed):
     if not compressed:
@@ -142,6 +218,10 @@ def open_log(file, compressed):
         with file.open("rb") as raw:
             with zstandard.ZstdDecompressor().stream_reader(raw) as reader:
                 yield io.BufferedReader(reader)
+    elif _libzstd():
+        with file.open("rb") as raw:
+            with io.BufferedReader(_ZstdReader(_libzstd(), raw)) as reader:
+                yield reader
     elif shutil.which("zstd"):
         process = subprocess.Popen(["zstd", "-dc", str(file)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         try:
@@ -168,6 +248,7 @@ def collect(config):
     scanned = 0
     more = False
     seen = set()
+    missing_zstd = "codex: compressed logs require libzstd, the zstd command or Python zstandard on the host"
     for app, roots in defaults.items():
         for root in config.get("roots", {}).get(app, roots):
             path = Path(os.path.expandvars(os.path.expanduser(root)))
@@ -233,7 +314,19 @@ def collect(config):
                                         finished = True
                                         break
                                     if len(line) > MAX_LINE:
-                                        raise ValueError("record exceeds 8 MiB")
+                                        # Oversized records (compaction snapshots, inline
+                                        # images) carry no usage: skip to the next line.
+                                        size = len(line)
+                                        while line and not line.endswith(b"\n"):
+                                            line = stream.readline(1 << 20)
+                                            size += len(line)
+                                        if not line:
+                                            if not compressed:
+                                                stream.seek(before)
+                                            break
+                                        if compressed:
+                                            offset += size
+                                        continue
                                     if not line.endswith(b"\n"):
                                         if not compressed:
                                             stream.seek(before)
@@ -263,8 +356,10 @@ def collect(config):
                             more = True
                     except Exception:
                         # Deliberately omit raw exception text (may include content).
-                        if compressed and not shutil.which("zstd"):
-                            errors.append("codex: compressed logs require zstd or Python zstandard on the host")
+                        if compressed and not has_zstd():
+                            if missing_zstd not in errors:
+                                errors.append(missing_zstd)
+                            continue
                         errors.append(app + ": unreadable or invalid session file (" + key[-12:] + ")")
                 if more and (len(events) >= MAX_EVENTS or time.monotonic() >= deadline):
                     break

@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -191,6 +192,15 @@ class RemoteUsageCollectorTest(unittest.TestCase):
                              self.token({"input_tokens": 150, "output_tokens": 20})])
         self.assertEqual([e["input"] for e in self.collector.collect(self.config)["events"]], [50])
 
+    def test_oversized_record_is_skipped(self):
+        file = Path(self.roots["claude"][0]) / "log.jsonl"
+        with file.open("w") as stream:
+            stream.write(json.dumps({"type": "compacted", "payload": "x" * (collector.MAX_LINE + 10)}) + "\n")
+            stream.write(json.dumps(self.claude()) + "\n")
+        result = self.collector.collect(self.config)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual([e["id"] for e in result["events"]], ["msg-1"])
+
     def test_batch_limit_resumes_without_losing_records(self):
         self.write("claude", [self.claude(str(i)) for i in range(5)])
         original = self.collector.MAX_EVENTS
@@ -205,6 +215,27 @@ class RemoteUsageCollectorTest(unittest.TestCase):
         finally:
             self.collector.MAX_EVENTS = original
 
+
+
+@unittest.skipUnless(collector._libzstd() and shutil.which("zstd"), "libzstd not found")
+class LibzstdCollectorTest(unittest.TestCase):
+    def test_reads_archive_without_cli_or_module(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "log.jsonl"
+            lines = [json.dumps({"n": i, "pad": "y" * 5000}) + "\n" for i in range(200)]
+            raw.write_text("".join(lines))
+            subprocess.run(["zstd", "-q", str(raw), "-o", str(raw) + ".zst"], check=True)
+            saved = sys.modules.get("zstandard")
+            sys.modules["zstandard"] = None
+            try:
+                with collector.open_log(Path(str(raw) + ".zst"), True) as stream:
+                    self.assertIsInstance(stream.raw, collector._ZstdReader)
+                    self.assertEqual(stream.read().decode(), "".join(lines))
+            finally:
+                if saved is None:
+                    sys.modules.pop("zstandard", None)
+                else:
+                    sys.modules["zstandard"] = saved
 
 
 @unittest.skipUnless(shutil.which("node"), "node not installed")

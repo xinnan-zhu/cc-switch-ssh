@@ -12,6 +12,7 @@ const MAX_LINE = 8 * 1024 * 1024;
 const MAX_ARCHIVE = 1024 * 1024 * 1024;
 const MAX_COUNT = 4294967295;
 const BIGINT = "__cc_switch_bigint__";
+const MISSING_ZSTD = "codex: compressed logs require the zstd command or Node.js 23.8+ on the host";
 
 function pyStr(value) {
   if (value === null || value === undefined) return "None";
@@ -340,11 +341,12 @@ function collectFile(app, file, key, prior, compressed, isJson, cutoff, events, 
           break;
         }
         const newline = data.indexOf(10, pos);
-        const end = newline === -1 ? data.length : newline + 1;
-        if (end - pos > MAX_LINE) throw new Error("record exceeds 8 MiB");
         if (newline === -1) break;
+        const end = newline + 1;
         const line = data.subarray(pos, end);
         pos = end;
+        // Oversized records (compaction snapshots, inline images) carry no usage.
+        if (line.length > MAX_LINE) continue;
         let record;
         try {
           record = JSON.parse(line.toString("utf8"));
@@ -424,7 +426,8 @@ function collect(config) {
           } catch (_) {
             // Deliberately omit raw exception text (may include content).
             if (compressed && !hasZstd()) {
-              errors.push("codex: compressed logs require zstd or Node.js zstd support on the host");
+              if (!errors.includes(MISSING_ZSTD)) errors.push(MISSING_ZSTD);
+              continue;
             }
             errors.push(app + ": unreadable or invalid session file (" + key.slice(-12) + ")");
           }

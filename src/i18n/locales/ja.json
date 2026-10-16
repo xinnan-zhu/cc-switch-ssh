@@ -4926,7 +4926,7 @@
   },
   "remoteUsage": {
     "title": "リモート使用量",
-    "description": "SSH で Claude、Codex、Gemini、Grok Build の使用量を同期します。会話や認証情報は転送しません。サーバーに Python 3 が必要です。",
+    "description": "SSH で Claude、Codex、Gemini、Grok Build の使用量を同期します。会話や認証情報は転送しません。サーバーに Python 3 または Node.js が必要です。",
     "auto": "5 分ごとに同期（SSH キー認証）",
     "history": "全履歴をインポート（既定は直近 30 日）",
     "paths": "ログディレクトリ",

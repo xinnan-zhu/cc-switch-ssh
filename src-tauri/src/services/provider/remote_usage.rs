@@ -10,8 +10,10 @@ use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::remote::{
-    configure_ssh_command, configure_ssh_password, resolve_ssh_target, InFlightGuard,
+    configure_ssh_command, configure_ssh_password, resolve_ssh_target, shell_single_quote,
+    InFlightGuard, ResolvedSshTarget,
 };
+use super::remote_cli::REMOTE_PATH_PRELUDE;
 use super::SshConnectionTarget;
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
@@ -20,6 +22,7 @@ use crate::services::session_usage::SessionSyncResult;
 use crate::services::usage_stats::find_model_pricing;
 
 const COLLECTOR: &str = include_str!("remote_usage_collector.py");
+const NODE_COLLECTOR: &str = include_str!("remote_usage_collector.cjs");
 const APPS: &[&str] = &["claude", "codex", "gemini", "grokbuild"];
 const MAX_OUTPUT: u64 = 16 * 1024 * 1024;
 
@@ -152,79 +155,29 @@ impl RemoteUsageService {
         let cursors: Value = serde_json::from_str(&cursors).map_err(json_error)?;
         let payload =
             serde_json::json!({"roots": config.roots, "cursors": cursors, "since": since});
-        let script = format!(
-            "CONFIG = __import__('json').loads({})\n{COLLECTOR}",
-            serde_json::to_string(&payload.to_string()).map_err(json_error)?
-        );
+        let config = serde_json::to_string(&payload.to_string()).map_err(json_error)?;
         let result = async {
-            let mut command = std::process::Command::new("ssh");
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                command.creation_flags(0x08000000);
+            let mut collection = run_collector(
+                &resolved,
+                "python3 -",
+                format!("CONFIG = __import__('json').loads({config})\n{COLLECTOR}"),
+            )
+            .await?;
+            if collection.is_none() {
+                // No python3: fall back to node, which nvm/fnm often only put on the login PATH.
+                let command = format!(
+                    "sh -c {}",
+                    shell_single_quote(&format!("{REMOTE_PATH_PRELUDE}exec node -"))
+                );
+                collection = run_collector(
+                    &resolved,
+                    &command,
+                    format!("var CONFIG_JSON = {config};\n{NODE_COLLECTOR}"),
+                )
+                .await?;
             }
-            configure_ssh_command(&mut command, &resolved, "python3 -");
-            let _askpass = configure_ssh_password(&mut command, &resolved)?;
-            let mut command = tokio::process::Command::from(command);
-            command
-                .kill_on_drop(true)
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped());
-            let mut child = command
-                .spawn()
-                .map_err(|e| AppError::Message(format!("启动 SSH 采集失败: {e}")))?;
-            let mut stdin = child
-                .stdin
-                .take()
-                .ok_or_else(|| AppError::Message("SSH stdin 不可用".into()))?;
-            let stdout = child
-                .stdout
-                .take()
-                .ok_or_else(|| AppError::Message("SSH stdout 不可用".into()))?;
-            let stderr = child
-                .stderr
-                .take()
-                .ok_or_else(|| AppError::Message("SSH stderr 不可用".into()))?;
-            let operation = async {
-                let write = async {
-                    stdin.write_all(script.as_bytes()).await?;
-                    stdin.shutdown().await
-                };
-                let read = async {
-                    let mut data = Vec::new();
-                    stdout.take(MAX_OUTPUT + 1).read_to_end(&mut data).await?;
-                    Ok::<_, std::io::Error>(data)
-                };
-                let errors = async {
-                    let mut data = Vec::new();
-                    stderr.take(8192).read_to_end(&mut data).await?;
-                    Ok::<_, std::io::Error>(data)
-                };
-                let (_, output, error, status) =
-                    tokio::try_join!(write, read, errors, child.wait())
-                        .map_err(|e| AppError::Message(format!("SSH 采集失败: {e}")))?;
-                if output.len() as u64 > MAX_OUTPUT {
-                    return Err(AppError::Message(
-                        "采集数据超过 16 MiB，未提交断点，请缩小日志目录范围".into(),
-                    ));
-                }
-                if !status.success() {
-                    // Python exceptions can contain source records. Never return raw stderr.
-                    let message =
-                        if String::from_utf8_lossy(&error).contains("python3: command not found") {
-                            "远端需要 Python 3"
-                        } else {
-                            "SSH 采集失败，请检查连接和远端 Python 3"
-                        };
-                    return Err(AppError::Message(message.into()));
-                }
-                serde_json::from_slice::<Collection>(&output)
-                    .map_err(|_| AppError::Message("远端采集返回无效元数据，未提交断点".into()))
-            };
-            let collection = tokio::time::timeout(std::time::Duration::from_secs(75), operation)
-                .await
-                .map_err(|_| AppError::Message("远端采集超时，断点保留，可重试".into()))??;
+            let collection = collection
+                .ok_or_else(|| AppError::Message("远端需要 Python 3 或 Node.js".into()))?;
             let db = db.clone();
             let host = host.clone();
             tauri::async_runtime::spawn_blocking(move || commit_collection(&db, &host, collection))
@@ -264,6 +217,92 @@ impl RemoteUsageService {
             Err(e) => log::warn!("Remote usage settings read failed: {e}"),
         }
     }
+}
+
+/// Runs one collector over SSH. `Ok(None)` means the interpreter is missing (exit 127).
+async fn run_collector(
+    resolved: &ResolvedSshTarget,
+    remote_command: &str,
+    script: String,
+) -> Result<Option<Collection>, AppError> {
+    let mut command = std::process::Command::new("ssh");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    configure_ssh_command(&mut command, resolved, remote_command);
+    let _askpass = configure_ssh_password(&mut command, resolved)?;
+    pipe_collector(command, script).await
+}
+
+async fn pipe_collector(
+    command: std::process::Command,
+    script: String,
+) -> Result<Option<Collection>, AppError> {
+    let mut command = tokio::process::Command::from(command);
+    command
+        .kill_on_drop(true)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|e| AppError::Message(format!("启动 SSH 采集失败: {e}")))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| AppError::Message("SSH stdin 不可用".into()))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| AppError::Message("SSH stdout 不可用".into()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| AppError::Message("SSH stderr 不可用".into()))?;
+    let operation = async {
+        // The interpreter reads its program until EOF, so stdin must be dropped:
+        // tokio's ChildStdin::shutdown does not close the pipe. A missing
+        // interpreter closes the pipe early; the exit status reports that.
+        let write = async move {
+            let _ = stdin.write_all(script.as_bytes()).await;
+            drop(stdin);
+            Ok::<_, std::io::Error>(())
+        };
+        let read = async {
+            let mut data = Vec::new();
+            stdout.take(MAX_OUTPUT + 1).read_to_end(&mut data).await?;
+            Ok::<_, std::io::Error>(data)
+        };
+        let errors = async {
+            let mut data = Vec::new();
+            stderr.take(8192).read_to_end(&mut data).await?;
+            Ok::<_, std::io::Error>(data)
+        };
+        let (_, output, _, status) = tokio::try_join!(write, read, errors, child.wait())
+            .map_err(|e| AppError::Message(format!("SSH 采集失败: {e}")))?;
+        if output.len() as u64 > MAX_OUTPUT {
+            return Err(AppError::Message(
+                "采集数据超过 16 MiB，未提交断点，请缩小日志目录范围".into(),
+            ));
+        }
+        if status.code() == Some(127) {
+            return Ok(None);
+        }
+        if !status.success() {
+            // Collector exceptions can contain source records. Never return raw stderr.
+            return Err(AppError::Message(
+                "SSH 采集失败，请检查连接和远端 Python 3 / Node.js".into(),
+            ));
+        }
+        serde_json::from_slice::<Collection>(&output)
+            .map(Some)
+            .map_err(|_| AppError::Message("远端采集返回无效元数据，未提交断点".into()))
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(75), operation)
+        .await
+        .map_err(|_| AppError::Message("远端采集超时，断点保留，可重试".into()))?
 }
 
 fn commit_collection(
@@ -391,6 +430,36 @@ mod tests {
     fn setup_host(db: &Database, host: &str) {
         let conn = db.conn.lock().unwrap();
         conn.execute("INSERT INTO remote_usage_hosts(host_key,target_json,config_json,since_at) VALUES(?1,'{}','{}',0)", [host]).unwrap();
+    }
+
+    fn local_collector(shell: &str, script: String) -> Option<Collection> {
+        let mut command = std::process::Command::new("sh");
+        command
+            .args(["-c", shell])
+            .env("HOME", std::env::temp_dir().join("cc-switch-no-logs"));
+        tauri::async_runtime::block_on(pipe_collector(command, script)).unwrap()
+    }
+
+    #[test]
+    fn collectors_finish_once_stdin_is_sent() {
+        let config = serde_json::to_string(r#"{"roots":{},"cursors":{},"since":0}"#).unwrap();
+        if std::process::Command::new("python3")
+            .arg("-V")
+            .output()
+            .is_ok()
+        {
+            let script = format!("CONFIG = __import__('json').loads({config})\n{COLLECTOR}");
+            assert!(local_collector("python3 -", script).is_some_and(|c| !c.more));
+        }
+        if std::process::Command::new("node")
+            .arg("-v")
+            .output()
+            .is_ok()
+        {
+            let script = format!("var CONFIG_JSON = {config};\n{NODE_COLLECTOR}");
+            assert!(local_collector("node -", script).is_some_and(|c| !c.more));
+        }
+        assert!(local_collector("exit 127", String::new()).is_none());
     }
 
     #[test]

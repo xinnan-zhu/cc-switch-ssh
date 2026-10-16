@@ -14,7 +14,25 @@ spec.loader.exec_module(collector)
 TS = "2026-10-14T01:00:00Z"
 
 
+NODE_SOURCE = SOURCE.with_suffix(".cjs")
+
+
+class NodeCollector:
+    """Runs the Node.js port with the same interface as the Python module."""
+    MAX_EVENTS = collector.MAX_EVENTS
+    stamp = staticmethod(collector.stamp)
+
+    def collect(self, config):
+        script = ("const c = require(process.argv[1]); c.LIMITS.events = Number(process.argv[2]);"
+                  "process.stdout.write(c.serialize(c.collect(c.parseConfig(require('fs').readFileSync(0, 'utf8')))));")
+        output = subprocess.run(["node", "-e", script, str(NODE_SOURCE), str(self.MAX_EVENTS)],
+                                input=json.dumps(config), capture_output=True, text=True, check=True).stdout
+        return json.loads(output)
+
+
 class RemoteUsageCollectorTest(unittest.TestCase):
+    collector = collector
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
@@ -45,20 +63,20 @@ class RemoteUsageCollectorTest(unittest.TestCase):
 
     def test_metadata_only_and_incremental_partial_tail(self):
         file = self.write("claude", [self.claude()])
-        result = collector.collect(self.config)
+        result = self.collector.collect(self.config)
         self.assertEqual(len(result["events"]), 1)
         self.assertNotIn("PRIVATE_PROMPT_AND_RESPONSE", json.dumps(result))
         self.config["cursors"] = result["cursors"]
-        self.assertEqual(collector.collect(self.config)["events"], [])
+        self.assertEqual(self.collector.collect(self.config)["events"], [])
         record = json.dumps(self.claude("msg-2"))
         with file.open("a") as stream:
             stream.write(record[:20])
-        incomplete = collector.collect(self.config)
+        incomplete = self.collector.collect(self.config)
         self.assertEqual(incomplete["events"], [])
         self.config["cursors"] = incomplete["cursors"]
         with file.open("a") as stream:
             stream.write(record[20:] + "\n")
-        self.assertEqual([e["id"] for e in collector.collect(self.config)["events"]], ["msg-2"])
+        self.assertEqual([e["id"] for e in self.collector.collect(self.config)["events"]], ["msg-2"])
 
     def test_codex_cumulative_deltas_lane_repeat_and_model_switch(self):
         a = {"input_tokens": 100, "output_tokens": 10, "cached_input_tokens": 80}
@@ -69,18 +87,18 @@ class RemoteUsageCollectorTest(unittest.TestCase):
             self.token(a), self.token(a, lane="other"),
             {"type": "turn_context", "payload": {"model": "gpt-5.1"}},
             self.token(b)])
-        result = collector.collect(self.config)
+        result = self.collector.collect(self.config)
         self.assertEqual([(e["input"], e["output"], e["cache_read"], e["model"]) for e in result["events"]],
                          [(100, 10, 80, "gpt-5"), (50, 20, 30, "gpt-5.1")])
         self.config["cursors"] = result["cursors"]
         self.write("codex", [self.token({"input_tokens": 180, "output_tokens": 35, "cached_input_tokens": 120})], mode="a")
-        self.assertEqual(collector.collect(self.config)["events"][0]["input"], 30)
+        self.assertEqual(self.collector.collect(self.config)["events"][0]["input"], 30)
 
     def test_codex_prefers_last_and_preserves_identity_after_rewrite(self):
         record = self.token({"input_tokens": 500, "output_tokens": 80}, {"input_tokens": 30, "output_tokens": 5})
         meta = {"type": "session_meta", "payload": {"id": "thread-1"}}
         file = self.write("codex", [meta, record])
-        result = collector.collect(self.config)
+        result = self.collector.collect(self.config)
         self.assertEqual(result["events"][0]["input"], 30)
         self.config["cursors"] = result["cursors"]
         original_stat = file.stat()
@@ -92,19 +110,19 @@ class RemoteUsageCollectorTest(unittest.TestCase):
         self.assertNotEqual(file.stat().st_ino, retired.stat().st_ino)
         # Even a replacement preserving size and timestamps must be rescanned.
         os.utime(file, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
-        rewritten = collector.collect(self.config)
+        rewritten = self.collector.collect(self.config)
         self.assertEqual(rewritten["errors"], [])
         self.assertEqual(len(rewritten["events"]), 1)
         self.assertEqual(rewritten["events"][0]["id"], result["events"][0]["id"])
 
     def test_error_keeps_original_cursor_and_has_no_conversation(self):
         self.write("claude", [self.claude()])
-        result = collector.collect(self.config)
+        result = self.collector.collect(self.config)
         self.config["cursors"] = result["cursors"]
         file = self.write("claude", [self.claude("msg-2")], mode="a")
         with file.open("a") as stream:
             stream.write("PRIVATE_MALFORMED_CONTENT\n")
-        failed = collector.collect(self.config)
+        failed = self.collector.collect(self.config)
         self.assertEqual(failed["events"], [])
         self.assertEqual(failed["cursors"], self.config["cursors"])
         self.assertNotIn("PRIVATE_MALFORMED_CONTENT", json.dumps(failed))
@@ -117,7 +135,7 @@ class RemoteUsageCollectorTest(unittest.TestCase):
                     "usage": {"modelUsage": {"grok-4": {"inputTokens": 100, "outputTokens": 30, "cachedReadTokens": 80}}}}}}
                    for prompt in ["p1", "p2"]]
         self.write("grokbuild", records, "updates.jsonl")
-        events = collector.collect(self.config)["events"]
+        events = self.collector.collect(self.config)["events"]
         self.assertEqual(len(events), 3)
         self.assertEqual(sum(e["output"] for e in events), 90)
         self.assertNotIn("PRIVATE", json.dumps(events))
@@ -130,31 +148,31 @@ class RemoteUsageCollectorTest(unittest.TestCase):
         compressed = raw.with_suffix(".jsonl.zst")
         subprocess.run(["zstd", "-q", "-f", str(raw), "-o", str(compressed)], check=True)
         raw.unlink()
-        original = collector.MAX_EVENTS
-        collector.MAX_EVENTS = 2
+        original = self.collector.MAX_EVENTS
+        self.collector.MAX_EVENTS = 2
         try:
             events = []
             for _ in range(4):
-                result = collector.collect(self.config)
+                result = self.collector.collect(self.config)
                 self.assertEqual(result["errors"], [])
                 events += result["events"]
                 self.config["cursors"] = result["cursors"]
             self.assertEqual(len(events), 5)
             self.assertEqual(sum(e["input"] for e in events), 500)
         finally:
-            collector.MAX_EVENTS = original
+            self.collector.MAX_EVENTS = original
 
     def test_codex_error_does_not_mutate_committed_signature(self):
         a = {"input_tokens": 100, "output_tokens": 10}
         b = {"input_tokens": 200, "output_tokens": 20}
         file = self.write("codex", [self.token(a)])
-        result = collector.collect(self.config)
+        result = self.collector.collect(self.config)
         self.config["cursors"] = result["cursors"]
         before = json.dumps(self.config["cursors"], sort_keys=True)
         self.write("codex", [self.token(b)], mode="a")
         with file.open("a") as stream:
             stream.write("invalid\n")
-        failed = collector.collect(self.config)
+        failed = self.collector.collect(self.config)
         self.assertEqual(json.dumps(failed["cursors"], sort_keys=True), before)
 
 
@@ -162,30 +180,48 @@ class RemoteUsageCollectorTest(unittest.TestCase):
         last = {"input_tokens": 100, "output_tokens": 10}
         self.write("codex", [self.token(None, last, timestamp="2026-10-14T01:00:00.100Z"),
                              self.token(None, last, timestamp="2026-10-14T01:00:00.200Z")])
-        events = collector.collect(self.config)["events"]
+        events = self.collector.collect(self.config)["events"]
         self.assertEqual(len(events), 2)
         self.assertNotEqual(events[0]["id"], events[1]["id"])
 
 
     def test_cutoff_still_advances_codex_baseline(self):
-        self.config["since"] = collector.stamp(TS)
+        self.config["since"] = self.collector.stamp(TS)
         self.write("codex", [self.token({"input_tokens": 100, "output_tokens": 10}, timestamp="2026-09-01T01:00:00Z"),
                              self.token({"input_tokens": 150, "output_tokens": 20})])
-        self.assertEqual([e["input"] for e in collector.collect(self.config)["events"]], [50])
+        self.assertEqual([e["input"] for e in self.collector.collect(self.config)["events"]], [50])
 
     def test_batch_limit_resumes_without_losing_records(self):
         self.write("claude", [self.claude(str(i)) for i in range(5)])
-        original = collector.MAX_EVENTS
-        collector.MAX_EVENTS = 2
+        original = self.collector.MAX_EVENTS
+        self.collector.MAX_EVENTS = 2
         try:
             ids = []
             for _ in range(3):
-                result = collector.collect(self.config)
+                result = self.collector.collect(self.config)
                 ids += [e["id"] for e in result["events"]]
                 self.config["cursors"] = result["cursors"]
             self.assertEqual(ids, [str(i) for i in range(5)])
         finally:
-            collector.MAX_EVENTS = original
+            self.collector.MAX_EVENTS = original
+
+
+
+@unittest.skipUnless(shutil.which("node"), "node not installed")
+class NodeRemoteUsageCollectorTest(RemoteUsageCollectorTest):
+    collector = NodeCollector()
+
+    def test_matches_python_output(self):
+        a = {"input_tokens": 100, "output_tokens": 10, "cached_input_tokens": 80}
+        self.write("claude", [self.claude(), self.claude("msg-2")])
+        self.write("codex", [{"type": "session_meta", "payload": {"id": "thread-é"}},
+                             {"type": "turn_context", "payload": {"model": "gpt-5"}}, self.token(a)])
+        self.write("grokbuild", [{"timestamp": TS, "params": {"update": {"usage": {"inputTokens": 5}}}}], "updates.jsonl")
+        expected = collector.collect(self.config)
+        actual = self.collector.collect(self.config)
+        self.assertEqual(actual, json.loads(json.dumps(expected)))
+        self.config["cursors"] = actual["cursors"]
+        self.assertEqual(collector.collect(self.config)["events"], [])
 
 
 if __name__ == "__main__":

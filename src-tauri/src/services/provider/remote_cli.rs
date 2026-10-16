@@ -37,7 +37,7 @@ const GROK_INSTALL_UNIX: &str = "bash -c 'tmp=$(mktemp) && curl -fsSL https://x.
 /// (bounded by `timeout` when the host has it) and add the usual per-user
 /// install directories as a fallback. `env` prints PATH colon-joined in every
 /// shell, fish included.
-const REMOTE_PATH_PRELUDE: &str = r#"limit() { if command -v timeout >/dev/null 2>&1; then timeout "$@"; else shift; "$@"; fi; }
+pub(super) const REMOTE_PATH_PRELUDE: &str = r#"limit() { if command -v timeout >/dev/null 2>&1; then timeout "$@"; else shift; "$@"; fi; }
 login_path=$(limit 15 "${SHELL:-/bin/sh}" -ilc 'echo; env' </dev/null 2>/dev/null | sed -n 's/^PATH=//p' | tail -n 1)
 [ -n "$login_path" ] && PATH="$login_path:$PATH"
 PATH="$PATH:$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.grok/bin:$HOME/.volta/bin:$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin"

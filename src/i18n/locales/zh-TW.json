@@ -4927,7 +4927,7 @@
   },
   "remoteUsage": {
     "title": "遠端用量統計",
-    "description": "透過 SSH 同步 Claude、Codex、Gemini 和 Grok Build 工作階段用量。僅傳輸用量中繼資料，不傳輸對話或憑證。遠端需要 Python 3。",
+    "description": "透過 SSH 同步 Claude、Codex、Gemini 和 Grok Build 工作階段用量。僅傳輸用量中繼資料，不傳輸對話或憑證。遠端需要 Python 3 或 Node.js。",
     "auto": "每 5 分鐘自動同步（SSH 金鑰登入）",
     "history": "匯入全部歷史（預設最近 30 天）",
     "paths": "自訂日誌目錄",

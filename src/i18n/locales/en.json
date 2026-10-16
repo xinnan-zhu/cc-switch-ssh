@@ -4926,7 +4926,7 @@
   },
   "remoteUsage": {
     "title": "Remote usage",
-    "description": "Sync Claude, Codex, Gemini and Grok Build session usage over SSH. Only usage metadata is transferred, never conversations or credentials. Requires Python 3 on the host.",
+    "description": "Sync Claude, Codex, Gemini and Grok Build session usage over SSH. Only usage metadata is transferred, never conversations or credentials. Requires Python 3 or Node.js on the host.",
     "auto": "Sync every 5 minutes (SSH key login)",
     "history": "Import all history (default: last 30 days)",
     "paths": "Custom log directories",

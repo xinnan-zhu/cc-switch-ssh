@@ -4926,7 +4926,7 @@
   },
   "remoteUsage": {
     "title": "远端用量统计",
-    "description": "通过 SSH 同步 Claude、Codex、Gemini 和 Grok Build 会话用量。仅传输时间、模型和 token 等元数据，不读取认证文件或传输对话。远端需要 Python 3。",
+    "description": "通过 SSH 同步 Claude、Codex、Gemini 和 Grok Build 会话用量。仅传输时间、模型和 token 等元数据，不读取认证文件或传输对话。远端需要 Python 3 或 Node.js。",
     "auto": "每 5 分钟自动同步（SSH 密钥登录）",
     "history": "导入全部历史（默认最近 30 天）",
     "paths": "自定义日志目录",

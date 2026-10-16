@@ -11,6 +11,7 @@ import { toast } from "@/lib/toast";
 import { invoke } from "@tauri-apps/api/core";
 import { useQueryClient } from "@tanstack/react-query";
 import {
+  ChevronLeft,
   ExternalLink,
   KeyRound,
   MoreHorizontal,
@@ -1173,6 +1174,21 @@ function App() {
   const renderAppPageHeader = () => (
     <AppPageHeader
       variant="app"
+      leading={
+        currentView === "remote" ? (
+          <HoverTip content={t("common.back")}>
+            <Button
+              variant="quiet"
+              size="icon-compact"
+              className="h-8 w-8"
+              onClick={() => setCurrentView("providers")}
+              aria-label={t("common.back")}
+            >
+              <ChevronLeft className="h-4 w-4" strokeWidth={1.5} />
+            </Button>
+          </HoverTip>
+        ) : undefined
+      }
       icon={<AppGlyph app={activeApp} size={20} badgeClassName="bg-app" />}
       title={APP_DISPLAY_NAME[activeApp]}
       subtitle={
@@ -1189,18 +1205,13 @@ function App() {
               setCurrentView("remote");
             }}
           />
-          {hasRemoteSupport && (
+          {hasRemoteSupport && currentView !== "remote" && (
             <Button
               variant="quiet"
               size="regular"
-              onClick={() =>
-                setCurrentView(
-                  currentView === "remote" ? "providers" : "remote",
-                )
-              }
+              onClick={() => setCurrentView("remote")}
               title={t("remote.manage")}
               aria-label={t("remote.manage")}
-              aria-pressed={currentView === "remote"}
             >
               <Server className="h-4 w-4" />
               {t("remote.title")}

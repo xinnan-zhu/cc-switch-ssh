@@ -2611,6 +2611,10 @@
     "presetDescription": "使用預設設定，只需填寫 API Key"
   },
   "remote": {
+    "tabs": {
+      "providers": "供應商",
+      "host": "CLI 與用量"
+    },
     "title": "遠端設定",
     "manage": "遠端 SSH 設定",
     "overwriteWarning": "遠端已有設定。切換會取代其中的供應商設定，建議先同步到本機。",

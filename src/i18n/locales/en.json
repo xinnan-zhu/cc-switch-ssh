@@ -2610,6 +2610,10 @@
     "presetDescription": "Use preset configuration, only API Key required"
   },
   "remote": {
+    "tabs": {
+      "providers": "Providers",
+      "host": "CLI & usage"
+    },
     "title": "Remote Config",
     "manage": "Remote SSH Config",
     "overwriteWarning": "The remote server already has config files. Switching will replace their provider settings, so sync them locally first if you want to keep them.",

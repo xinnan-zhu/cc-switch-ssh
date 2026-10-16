@@ -1,4 +1,4 @@
-import { render, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { RemoteProviderPage } from "@/components/remote/RemoteProviderPage";
@@ -70,6 +70,41 @@ describe("remote Grok configuration preview", () => {
     if (!config.includes("[broken")) {
       expect(container.querySelector("pre")?.textContent).toContain("grok-4.5");
     }
+    client.clear();
+  });
+
+  it("keeps CLI versions and usage on their own tab", async () => {
+    vi.spyOn(providersApi, "inspectRemote").mockResolvedValue({
+      hostAlias: "test-host",
+      app: "grokbuild",
+      provider: null,
+      files: [],
+      hasExistingConfig: false,
+      hasUnmanagedConfig: false,
+      warnings: [],
+    });
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={client}>
+        <RemoteProviderPage
+          appId="grokbuild"
+          providers={{}}
+          currentProviderId=""
+          focusTarget={{
+            target: { type: "config", alias: "test-host" },
+            nonce: 1,
+          }}
+        />
+      </QueryClientProvider>,
+    );
+    const hostTab = await screen.findByRole("tab", { name: "CLI 与用量" });
+    expect(screen.getByText("切换远端供应商")).toBeInTheDocument();
+    expect(screen.queryByText("remoteUsage.title")).toBeNull();
+    fireEvent.click(hostTab);
+    expect(await screen.findByText("remoteUsage.title")).toBeInTheDocument();
+    expect(screen.queryByText("切换远端供应商")).toBeNull();
     client.clear();
   });
 });

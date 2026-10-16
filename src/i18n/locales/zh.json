@@ -2610,6 +2610,10 @@
     "presetDescription": "使用预设配置，只需填写 API Key"
   },
   "remote": {
+    "tabs": {
+      "providers": "供应商",
+      "host": "CLI 与用量"
+    },
     "title": "远端配置",
     "manage": "远端 SSH 配置",
     "overwriteWarning": "远端已有配置。切换会替换其中的供应商配置，建议先同步到本地。",

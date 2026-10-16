@@ -41,6 +41,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { PageTabs } from "@/components/ui/page-tabs";
 import { RemoteUsageCard } from "./RemoteUsageCard";
 import { RemoteCliCard } from "./RemoteCliCard";
 import { RemoteGatewayCard } from "./RemoteGatewayCard";
@@ -162,6 +163,7 @@ export function RemoteProviderPage({
   const [confirmApplyProvider, setConfirmApplyProvider] =
     useState<Provider | null>(null);
   const [confirmRestart, setConfirmRestart] = useState(false);
+  const [section, setSection] = useState<"providers" | "host">("providers");
   const [confirmDisableGateway, setConfirmDisableGateway] =
     useState<Provider | null>(null);
 
@@ -1061,6 +1063,26 @@ export function RemoteProviderPage({
       )}
 
       {connectedTarget && remoteQuery.data && (
+        <PageTabs
+          aria-label={connectedHost}
+          idPrefix="remote-section"
+          size="sm"
+          value={section}
+          onValueChange={setSection}
+          items={[
+            {
+              value: "providers",
+              label: t("remote.tabs.providers", { defaultValue: "供应商" }),
+            },
+            {
+              value: "host",
+              label: t("remote.tabs.host", { defaultValue: "CLI 与用量" }),
+            },
+          ]}
+        />
+      )}
+
+      {connectedTarget && remoteQuery.data && section === "host" && (
         <RemoteCliCard
           key={connectedTargetKey}
           target={connectedTarget}
@@ -1071,7 +1093,7 @@ export function RemoteProviderPage({
         />
       )}
 
-      {connectedTarget && remoteQuery.data && (
+      {connectedTarget && remoteQuery.data && section === "host" && (
         <RemoteUsageCard
           key={`usage:${connectedTargetKey}`}
           target={connectedTarget}
@@ -1079,7 +1101,7 @@ export function RemoteProviderPage({
         />
       )}
 
-      {remoteQuery.data && (
+      {remoteQuery.data && section === "providers" && (
         <RemoteGatewayCard
           appName={t(`apps.${appId}`)}
           hostLabel={connectedHost}
@@ -1094,7 +1116,7 @@ export function RemoteProviderPage({
         />
       )}
 
-      {remoteQuery.data && (
+      {remoteQuery.data && section === "providers" && (
         <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(22rem,0.9fr)]">
           <section className="rounded-lg border border-border bg-card p-4">
             <div className="flex flex-wrap items-start justify-between gap-3">

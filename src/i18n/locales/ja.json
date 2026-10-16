@@ -2610,6 +2610,10 @@
     "presetDescription": "プリセットを使用。API Key だけ入力すれば OK"
   },
   "remote": {
+    "tabs": {
+      "providers": "プロバイダー",
+      "host": "CLI と使用量"
+    },
     "title": "リモート設定",
     "manage": "リモート SSH 設定",
     "overwriteWarning": "リモートには既存の設定があります。切り替えるとプロバイダー設定が置き換えられるため、保持したい場合は先にローカルへ同期してください。",

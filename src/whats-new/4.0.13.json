@@ -2,6 +2,13 @@
   "version": "4.0.13",
   "items": [
     {
+      "type": "fix",
+      "zh": "远端用量同步不再超时，远端没有 Python 时改用 Node.js",
+      "zh-TW": "遠端用量同步不再逾時，遠端沒有 Python 時改用 Node.js",
+      "en": "Remote usage sync no longer times out, and falls back to Node.js when the host has no Python",
+      "ja": "リモート使用量の同期がタイムアウトしなくなり、Python がない場合は Node.js を使用"
+    },
+    {
       "type": "new",
       "zh": "Claude Desktop 可选直连、路由、聚合三种模式",
       "zh-TW": "Claude Desktop 可選直連、路由、聚合三種模式",
@@ -21,13 +28,6 @@
       "zh-TW": "1M 模型的預設改為宣告 1M，Haiku 檔也能勾；GPT 視窗上限 272K",
       "en": "Presets for 1M models now declare 1M (Haiku tier too), and GPT windows are capped at 272K",
       "ja": "1M モデルのプリセットは 1M を宣言（Haiku 枠も可）、GPT は 272K が上限に"
-    },
-    {
-      "type": "improve",
-      "zh": "Windows 便携版点更新直接下载对应的压缩包",
-      "zh-TW": "Windows 可攜版點更新直接下載對應的壓縮檔",
-      "en": "Windows portable builds download the matching zip straight from the update button",
-      "ja": "Windows ポータブル版は更新ボタンから対応する zip を直接ダウンロード"
     }
   ]
 }

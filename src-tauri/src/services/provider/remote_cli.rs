@@ -3,7 +3,7 @@
 //!
 //! One SSH round trip probes every CLI (path, resolved target, `--version`).
 //! The install source is read from the resolved target so the update goes
-//! through the same channel: the npm next to the binary, the CLI's own
+//! through the same channel: the resolved install's npm, the CLI's own
 //! `update`, or Homebrew. Unknown sources are reported instead of guessed, so
 //! an update never installs a second copy that the old one still shadows.
 
@@ -127,9 +127,9 @@ struct Probe {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Plan {
-    /// `npm i -g` with the npm in the binary's directory, else the one on PATH.
+    /// Prefer the resolved installation's npm, then the launcher directory and PATH.
     Npm {
-        bin_dir: String,
+        bin_dirs: Vec<String>,
     },
     SelfUpdate,
     Brew {
@@ -339,13 +339,20 @@ fn update_plan(probe: &Probe) -> Option<Plan> {
     let real = probe.real.as_deref()?;
     match install_source(probe) {
         RemoteCliSource::Brew => brew_package(real).map(|(cask, name)| Plan::Brew { cask, name }),
-        RemoteCliSource::Npm => Some(Plan::Npm {
-            bin_dir: path
-                .rsplit_once('/')
-                .map(|(dir, _)| dir)
-                .unwrap_or("")
-                .to_string(),
-        }),
+        RemoteCliSource::Npm => {
+            let mut bin_dirs = Vec::new();
+            // The PATH entry can be a symlink in ~/.local/bin while npm lives
+            // alongside Node under nvm/fnm or another global install prefix.
+            if let Some((prefix, _)) = real.split_once("/lib/node_modules/") {
+                bin_dirs.push(format!("{prefix}/bin"));
+            }
+            if let Some((dir, _)) = path.rsplit_once('/') {
+                if !bin_dirs.iter().any(|candidate| candidate == dir) {
+                    bin_dirs.push(dir.to_string());
+                }
+            }
+            Some(Plan::Npm { bin_dirs })
+        }
         RemoteCliSource::Native => Some(Plan::SelfUpdate),
         // Claude's own updater knows every channel it was installed from.
         RemoteCliSource::Unknown if probe.tool == "claude" => Some(Plan::SelfUpdate),
@@ -366,12 +373,19 @@ fn update_command(probe: &Probe) -> Result<String, AppError> {
     })?;
     let bin = shell_single_quote(probe.path.as_deref().unwrap_or(&probe.tool));
     Ok(match plan {
-        Plan::Npm { bin_dir } => {
+        Plan::Npm { bin_dirs } => {
             let (package, extra) = crate::commands::npm_install_args_for_tool(&probe.tool)
                 .ok_or_else(|| AppError::Message(format!("{} 没有 npm 包", probe.tool)))?;
+            let candidates = bin_dirs
+                .iter()
+                .map(|dir| shell_single_quote(&format!("{dir}/npm")))
+                .collect::<Vec<_>>()
+                .join(" ");
             format!(
-                "npm_bin={}/npm; [ -x \"$npm_bin\" ] || npm_bin=npm; \"$npm_bin\" i -g {package}@latest{extra}",
-                shell_single_quote(&bin_dir)
+                "npm_bin=''; for candidate in {candidates}; do if [ -x \"$candidate\" ]; then npm_bin=\"$candidate\"; break; fi; done; \
+                 if [ -z \"$npm_bin\" ]; then npm_bin=$(command -v npm 2>/dev/null) || \
+                 {{ printf '%s\\n' '检测到 npm 包安装，但远端登录环境及安装目录中均找不到 npm，请检查 Node/npm 安装' >&2; exit 127; }}; fi; \
+                 PATH=\"${{npm_bin%/*}}:$PATH\"; export PATH; \"$npm_bin\" i -g {package}@latest{extra}"
             )
         }
         Plan::SelfUpdate if probe.tool == "grok" => {
@@ -386,12 +400,15 @@ fn update_command(probe: &Probe) -> Result<String, AppError> {
     })
 }
 
-/// Runs `command` under the host's login PATH, capped at 15 minutes, and
-/// reports its output and exit code instead of failing the SSH call.
+/// Run inside the host's interactive login shell, retaining its exported proxy
+/// and npm settings and keeping temporary fnm PATH entries alive for the update.
+/// The POSIX command runs in a child sh so fish users work too. Keep the existing
+/// 15 minute limit and report the exit code separately from the SSH call.
 fn update_script(command: &str) -> String {
+    let login_command = format!("sh -c {}", shell_single_quote(command));
     format!(
-        "{REMOTE_PATH_PRELUDE}out=$( (limit 900 sh -c {}) </dev/null 2>&1 ); code=$?\nprintf '%s\\n' \"$out\"\nprintf '{EXIT_MARKER}%s\\n' \"$code\"\n",
-        shell_single_quote(command)
+        "{REMOTE_PATH_PRELUDE}out=$( (limit 900 \"${{SHELL:-/bin/sh}}\" -ilc {}) </dev/null 2>&1 ); code=$?\nprintf '%s\\n' \"$out\"\nprintf '{EXIT_MARKER}%s\\n' \"$code\"\n",
+        shell_single_quote(&login_command)
     )
 }
 
@@ -533,7 +550,7 @@ mod tests {
             "2.1.3",
         );
         let command = update_command(&npm).unwrap();
-        assert!(command.starts_with("npm_bin='/home/u/.nvm/versions/node/v22/bin'/npm;"));
+        assert!(command.contains("'/home/u/.nvm/versions/node/v22/bin/npm'"));
         assert!(command.contains(
             "\"$npm_bin\" i -g @anthropic-ai/claude-code@latest --ignore-scripts=false --include=optional --allow-scripts=@anthropic-ai/claude-code"
         ));
@@ -647,13 +664,17 @@ mod tests {
         }
 
         fn run(home: &Path, args: &[&str], script: &str) -> String {
+            run_with_shell(home, Path::new("/bin/sh"), args, script)
+        }
+
+        fn run_with_shell(home: &Path, shell: &Path, args: &[&str], script: &str) -> String {
             let mut child = Command::new("sh")
                 .arg("-s")
                 .arg("--")
                 .args(args)
                 .env("HOME", home)
                 // A shell without rc files, so the login-PATH lookup is a no-op.
-                .env("SHELL", "/bin/sh")
+                .env("SHELL", shell)
                 .env("PATH", "/usr/bin:/bin")
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -736,6 +757,98 @@ mod tests {
                 fs::read_to_string(log).unwrap().trim(),
                 "i -g @google/gemini-cli@latest"
             );
+        }
+
+        #[test]
+        fn npm_update_follows_symlink_to_its_node_prefix_and_keeps_node_on_path() {
+            let home = tempfile::tempdir().unwrap();
+            let home = fs::canonicalize(home.path()).unwrap();
+            let bin = home.join(".nvm/versions/node/v22/bin");
+            let package =
+                home.join(".nvm/versions/node/v22/lib/node_modules/@openai/codex/bin/codex.js");
+            executable(&package, "echo 'codex-cli 0.160.0'");
+            executable(&bin.join("node"), "printf '%s\\n' 'correct-node'");
+            executable(&bin.join("npm"), "node; printf '%s\\n' \"$*\"");
+            let launcher = home.join(".local/bin/codex");
+            fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(&package, &launcher).unwrap();
+            // A different npm beside the launcher must not update another install.
+            executable(&home.join(".local/bin/npm"), "echo wrong-npm; exit 99");
+            let probe = probe_local(&home, &["codex"]).pop().unwrap();
+            let output = run(&home, &[], &update_script(&update_command(&probe).unwrap()));
+            let (log, code) = split_exit_code(&output).unwrap();
+            assert_eq!(code, 0, "{log}");
+            assert!(log.contains("correct-node"), "{log}");
+            assert!(log.contains("i -g @openai/codex@latest"), "{log}");
+            assert!(!log.contains("wrong-npm"), "{log}");
+        }
+
+        #[test]
+        fn update_keeps_login_proxy_settings_and_temporary_npm_path_alive() {
+            let home = tempfile::tempdir().unwrap();
+            let home = fs::canonicalize(home.path()).unwrap();
+            let login_shell = home.join("login-shell");
+            // Like fnm, this login shell creates a per-session PATH entry and
+            // removes it when it exits. Copying PATH out of it is insufficient.
+            executable(
+                &login_shell,
+                r#"
+session_bin=$(mktemp -d "$HOME/node-session.XXXXXX")
+trap 'rm -rf "$session_bin"' EXIT
+printf '#!/bin/sh\nprintf "%%s\\n" "session-npm:$*"\n' > "$session_bin/npm"
+chmod +x "$session_bin/npm"
+export PATH="$session_bin:/usr/bin:/bin"
+export HTTP_PROXY='http://proxy.invalid:3128'
+export https_proxy='http://user:p@proxy.invalid:3129'
+export ALL_PROXY='socks5://proxy.invalid:1080'
+export no_proxy='localhost,127.0.0.1'
+export npm_config_registry='https://registry.invalid/'
+/bin/sh -c "$2"
+"#,
+            );
+            let probe = probe_of(
+                "codex",
+                Some("/missing/bin/codex"),
+                Some("/missing/lib/node_modules/@openai/codex/bin/codex.js"),
+                "0.160.0",
+            );
+            let command = format!(
+                "{}; printf '%s\\n' \"$HTTP_PROXY\" \"$https_proxy\" \"$ALL_PROXY\" \"$no_proxy\" \"$npm_config_registry\"",
+                update_command(&probe).unwrap()
+            );
+            let output = run_with_shell(&home, &login_shell, &[], &update_script(&command));
+            let (log, code) = split_exit_code(&output).unwrap();
+            assert_eq!(code, 0, "{log}");
+            assert!(
+                log.contains("session-npm:i -g @openai/codex@latest"),
+                "{log}"
+            );
+            for value in [
+                "http://proxy.invalid:3128",
+                "http://user:p@proxy.invalid:3129",
+                "socks5://proxy.invalid:1080",
+                "localhost,127.0.0.1",
+                "https://registry.invalid/",
+            ] {
+                assert!(log.lines().any(|line| line == value), "{log}");
+            }
+        }
+
+        #[test]
+        fn missing_npm_reports_the_package_detection_separately() {
+            let home = tempfile::tempdir().unwrap();
+            let probe = probe_of(
+                "codex",
+                Some("/missing/bin/codex"),
+                Some("/missing/lib/node_modules/@openai/codex/bin/codex.js"),
+                "0.160.0",
+            );
+            // Deliberately omit all real Node installations from the environment.
+            let command = format!("PATH=/nonexistent; {}", update_command(&probe).unwrap());
+            let output = run(home.path(), &[], &update_script(&command));
+            let (log, code) = split_exit_code(&output).unwrap();
+            assert_eq!(code, 127, "{log}");
+            assert!(log.contains("检测到 npm 包安装"), "{log}");
         }
 
         #[test]

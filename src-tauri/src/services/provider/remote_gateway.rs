@@ -988,8 +988,9 @@ impl RemoteGatewayService {
     }
 
     /// Switches which provider the host uses. Takes effect on the next
-    /// request: the proxy sends the routed provider's model (Gemini's model in
-    /// the URL included); Codex also rewrites its remote `model`.
+    /// request. Codex receives the new provider's config; subsequent native
+    /// Responses requests honor the model selected in the remote client.
+    /// Gemini's model in the URL is mapped to the routed provider's model.
     pub async fn set_provider(
         state: &AppState,
         app: AppType,
@@ -1033,7 +1034,8 @@ impl RemoteGatewayService {
                     written_files = written;
                     remote_state = Some(state_after);
                 }
-                // The route already switched; the proxy fixes up the model.
+                // The route already switched, but the remote config could not
+                // be refreshed. Native Responses keeps the client's selection.
                 Err(e) => log::warn!("[RemoteGateway] Codex model push to {host_key} failed: {e}"),
             }
         }

@@ -1864,6 +1864,15 @@ impl RequestForwarder {
                 mapped_body,
                 reasoning_config.as_ref(),
             )?;
+            let signature_fallbacks =
+                super::providers::codex_chat_common::fill_gemini_thought_signature_fallback(
+                    &mut chat_body,
+                );
+            if signature_fallbacks > 0 {
+                log::debug!(
+                    "[Codex] Filled {signature_fallbacks} missing Gemini thought signature(s) with the skip placeholder"
+                );
+            }
             super::providers::inject_codex_chat_prompt_cache_key(
                 provider,
                 &mut chat_body,
@@ -1960,16 +1969,9 @@ impl RequestForwarder {
             mapped_body
         };
 
-        // Remote clients retain the model last pushed over SSH. Refresh it when
-        // routing changes, while preserving a model explicitly resolved by Stack.
-        if matches!(app_type, AppType::Codex)
-            && !codex_responses_to_chat
-            && !codex_responses_to_anthropic
-            && !self.keeps_resolved_model()
-            && super::remote_gateway::current_origin().is_some()
-        {
-            super::providers::apply_codex_upstream_model(provider, &mut request_body);
-        }
+        // Native Responses clients choose their own model, including remote
+        // clients whose selection is absent from the provider's saved catalog.
+        // Provider changes update the remote config through set_provider.
 
         // Codex 远程压缩，以及同一线程里别家回合留下的状态（见 `codex_compaction`）。
         // Chat / Anthropic 转换在转换器里处理；这里管原样转发的两种上游：官方清掉
@@ -2522,10 +2524,14 @@ impl RequestForwarder {
             // 身份（`chatgpt-account-id` 等），它们只能发往官方上游。Stack 目标不会是官方账号，
             // 这里仍按上游判断，防止以后放宽。只限 Codex：Claude Code 自己的 `x-stainless-*`
             // 是 Anthropic SDK 的正常请求头，Stack 请求照常转发。
-            if (codex_responses_to_anthropic
-                || (codex_stack_request && !codex_official_auth_passthrough))
-                && is_codex_client_fingerprint_header(key_str)
-            {
+            if should_strip_codex_client_fingerprint_header(
+                key_str,
+                &effective_endpoint,
+                codex_responses_to_anthropic,
+                codex_responses_to_chat,
+                codex_stack_request,
+                codex_official_auth_passthrough,
+            ) {
                 continue;
             }
 
@@ -3618,6 +3624,37 @@ fn is_codex_client_fingerprint_header(key_str: &str) -> bool {
         || key_str.starts_with("x-responsesapi-")
 }
 
+/// Decide whether a Codex fingerprint header must be removed before the request
+/// reaches an upstream.
+///
+/// Stack requests to a third party still must not carry ChatGPT session or
+/// account identity. A native Responses third party, however, may use the
+/// non-identity `x-codex-beta-features` marker to recognize the Codex protocol
+/// and reject requests without it. Keep only that marker; all other Codex and
+/// OpenAI identity headers remain stripped. Converted Chat/Anthropic requests
+/// continue to receive a clean client fingerprint.
+fn should_strip_codex_client_fingerprint_header(
+    key_str: &str,
+    endpoint: &str,
+    codex_responses_to_anthropic: bool,
+    codex_responses_to_chat: bool,
+    codex_stack_request: bool,
+    codex_official_auth_passthrough: bool,
+) -> bool {
+    if codex_responses_to_anthropic {
+        return is_codex_client_fingerprint_header(key_str);
+    }
+
+    if codex_stack_request && !codex_official_auth_passthrough {
+        let native_third_party_responses =
+            !codex_responses_to_chat && super::providers::is_codex_responses_endpoint(endpoint);
+        return is_codex_client_fingerprint_header(key_str)
+            && !(native_third_party_responses && key_str == "x-codex-beta-features");
+    }
+
+    false
+}
+
 fn codex_anthropic_error_envelope_message(body: &[u8]) -> Option<String> {
     let value: Value = serde_json::from_slice(body).ok()?;
     if value.get("type").and_then(Value::as_str) != Some("error") && value.get("error").is_none() {
@@ -4261,12 +4298,15 @@ fn should_force_identity_encoding(
 }
 
 fn map_reqwest_send_error(error: reqwest::Error) -> ProxyError {
-    if error.is_timeout() {
-        ProxyError::Timeout(format!("上游请求超时: {}", error.without_url()))
-    } else if error.is_connect() {
-        ProxyError::ForwardFailed(format!("上游连接失败: {}", error.without_url()))
+    let is_timeout = error.is_timeout();
+    let is_connect = error.is_connect();
+    let detail = super::error::describe_reqwest_error(error);
+    if is_timeout {
+        ProxyError::Timeout(format!("上游请求超时: {detail}"))
+    } else if is_connect {
+        ProxyError::ForwardFailed(format!("上游连接失败: {detail}"))
     } else {
-        ProxyError::ForwardFailed(format!("上游请求发送失败: {}", error.without_url()))
+        ProxyError::ForwardFailed(format!("上游请求发送失败: {detail}"))
     }
 }
 
@@ -6102,7 +6142,13 @@ mod tests {
         let continuation = json!({
             "input": [{"type": "function_call_output", "call_id": "call-1", "output": "done"}]
         });
-        for source in ["session_id", "x-session-id", "metadata"] {
+        for source in [
+            "session_id",
+            "x-session-id",
+            "session-id",
+            "thread-id",
+            "metadata",
+        ] {
             let mut headers = HeaderMap::new();
             let mut body = first.clone();
             let session_id = "12345678-1234-1234-1234-123456789abc";
@@ -7004,6 +7050,7 @@ mod tests {
                 ("chatgpt-account-id", "acct-workspace"),
                 ("originator", "codex_cli_rs"),
                 ("session_id", "session-1"),
+                ("x-codex-beta-features", "remote_compaction_v2"),
                 ("x-codex-turn-state", "state"),
                 ("openai-beta", "responses=experimental"),
                 ("x-oai-attestation", "device-proof"),
@@ -7050,7 +7097,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn stacked_requests_never_carry_the_chatgpt_identity() {
+        async fn stacked_requests_drop_chatgpt_identity_but_keep_native_responses_beta_marker() {
             let upstream = upstream().await;
             for api_format in ["openai_responses", "openai_chat", "anthropic"] {
                 let seen = send(
@@ -7061,12 +7108,25 @@ mod tests {
                     body("listed", json!([])),
                 )
                 .await;
-                for (name, _) in seen.headers.iter() {
+                for name in [
+                    "chatgpt-account-id",
+                    "originator",
+                    "session_id",
+                    "x-codex-turn-state",
+                    "openai-beta",
+                    "x-oai-attestation",
+                    "x-openai-fedramp",
+                ] {
                     assert!(
-                        !is_codex_client_fingerprint_header(name.as_str()),
+                        !seen.headers.contains_key(name),
                         "{api_format}: {name} reached a third party"
                     );
                 }
+                assert_eq!(
+                    seen.headers.contains_key("x-codex-beta-features"),
+                    api_format == "openai_responses",
+                    "{api_format}: protocol marker handling"
+                );
                 let auth = seen
                     .headers
                     .get("authorization")
@@ -7078,7 +7138,7 @@ mod tests {
                 assert!(!auth.contains("chatgpt"), "{api_format}: {auth}");
             }
 
-            // 对照：路由请求发往原生 Responses 时照旧转发这些头。
+            // Control: routing requests to native Responses still forward these headers.
             let seen = send(
                 &forwarder(false),
                 &upstream,
@@ -7088,11 +7148,12 @@ mod tests {
             )
             .await;
             assert!(seen.headers.contains_key("session_id"));
+            assert!(seen.headers.contains_key("x-codex-beta-features"));
         }
 
-        /// 原生 Responses 第三方收不了 Codex 私有的压缩触发：改成禁止新工具调用的摘要回合
-        /// （工具定义保留，历史里的调用条目还引用着它们），CC Switch 包装的压缩摘要改成
-        /// 普通消息；看不出来源的压缩密文原样发出。
+        /// Native Responses third parties cannot consume Codex's private compaction
+        /// trigger. Rewrite it into a summary turn that prevents new tool calls
+        /// while preserving tool definitions and historical tool-call references.
         #[tokio::test]
         async fn native_third_party_compaction_becomes_summary_turn() {
             use crate::proxy::providers::codex_compaction::{
@@ -7508,7 +7569,8 @@ mod tests {
                 gate(AppType::Codex, &third_party),
                 Some(OpaqueStateRejection {
                     reasoning: false,
-                    compaction: true
+                    compaction: true,
+                    item_ids: false,
                 })
             );
             assert_eq!(gate(AppType::Codex, &official), None);
@@ -7550,6 +7612,7 @@ mod tests {
                 Some(OpaqueStateRejection {
                     reasoning: false,
                     compaction: true,
+                    item_ids: false,
                 })
             );
             assert_eq!(

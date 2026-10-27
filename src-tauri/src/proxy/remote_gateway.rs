@@ -436,6 +436,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn codex_gateway_preserves_client_model_outside_provider_catalog() {
+        use serde_json::{json, Value};
+        use tower::Service;
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let seen = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<Value>::new()));
+        let upstream = {
+            let seen = seen.clone();
+            Router::new().fallback(move |axum::Json(body): axum::Json<Value>| {
+                let seen = seen.clone();
+                async move {
+                    seen.lock().await.push(body);
+                    axum::Json(json!({"id": "r1", "object": "response", "output": []}))
+                }
+            })
+        };
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+
+        let provider = Provider::with_id(
+            "remote-model".into(),
+            "Remote model".into(),
+            json!({
+                "auth": {"OPENAI_API_KEY": "test-key"},
+                "config": format!(
+                    "model_provider = \"custom\"\nmodel = \"gpt-5.6-terra\"\n[model_providers.custom]\nbase_url = \"http://{address}/v1\"\nwire_api = \"responses\"\n"
+                ),
+                "modelCatalog": {"models": [{"model": "gpt-5.6-terra"}]}
+            }),
+            None,
+        );
+        for pinned in [false, true] {
+            let state = routed_state(&provider, pinned);
+            state
+                .db
+                .set_current_provider("codex", &provider.id)
+                .unwrap();
+            let server = crate::proxy::server::ProxyServer::new(
+                crate::proxy::types::ProxyConfig::default(),
+                state.db.clone(),
+                None,
+            );
+            for catalog in [true, false] {
+                let mut row = provider.clone();
+                if !catalog {
+                    row.settings_config
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("modelCatalog");
+                }
+                state.db.save_provider("codex", &row).unwrap();
+                for endpoint in ["/v1/responses", "/v1/responses/compact"] {
+                    for model in ["gpt-6.1-sol", "gpt-5.6-terra"] {
+                        let request = http::Request::builder()
+                            .method("POST")
+                            .uri(endpoint)
+                            .header("content-type", "application/json")
+                            .body(Body::from(
+                                json!({
+                                    "model": model, "input": [], "stream": false
+                                })
+                                .to_string(),
+                            ))
+                            .unwrap();
+                        let response = REMOTE_ORIGIN
+                            .scope(
+                                RemoteOrigin {
+                                    host_key: "remote-test-host".into(),
+                                },
+                                server.router().call(request),
+                            )
+                            .await
+                            .unwrap();
+                        assert_eq!(response.status(), StatusCode::OK);
+                        let _ = axum::body::to_bytes(response.into_body(), 65536)
+                            .await
+                            .unwrap();
+                        let sent = seen.lock().await.pop().expect("upstream request");
+                        assert_eq!(
+                            sent["model"], model,
+                            "pinned={pinned} catalog={catalog} {endpoint}"
+                        );
+                    }
+                }
+            }
+        }
+        task.abort();
+    }
+
+    #[tokio::test]
     async fn remote_pinned_context_disables_failover_and_records_host_source() {
         use crate::app_config::AppType;
         use crate::proxy::handler_context::RequestContext;

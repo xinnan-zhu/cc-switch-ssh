@@ -140,8 +140,23 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          pnpm tauri build --bundles appimage,deb,rpm \
+          pnpm tauri build --bundles appimage,deb \
             --config src-tauri/tauri.release.conf.json
+
+          # RPM forbids '-' in Version. Only override package metadata during
+          # standalone bundling; the already-built app keeps its full SSH version.
+          version=$(jq -r .version src-tauri/tauri.release.conf.json)
+          rpm_version="${version%-ssh.*}"
+          rpm_release="1.ssh.${version##*.}"
+          jq -n --arg version "$rpm_version" --arg release "$rpm_release" \
+            '{version: $version, bundle: {linux: {rpm: {release: $release}}}}' \
+            > src-tauri/tauri.rpm.conf.json
+          pnpm tauri bundle --bundles rpm \
+            --config src-tauri/tauri.release.conf.json \
+            --config src-tauri/tauri.rpm.conf.json
+          rpm_package=$(find src-tauri/target/release/bundle/rpm -name '*.rpm' -type f | head -1)
+          test -n "$rpm_package"
+          test "$(rpm -qp --qf '%{VERSION} %{RELEASE}' "$rpm_package")" = "$rpm_version $rpm_release"
 
       - name: Prepare macOS assets
         if: runner.os == 'macOS'

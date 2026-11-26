@@ -29,6 +29,7 @@ const CodexOauthQuotaFooter: React.FC<CodexOauthQuotaFooterProps> = ({
     data: quota,
     isFetching: loading,
     refetch,
+    manualIdle,
   } = useCodexOauthQuota(meta, {
     enabled: true,
     autoQuery: isCurrent && autoQueryInterval > 0,
@@ -40,7 +41,7 @@ const CodexOauthQuotaFooter: React.FC<CodexOauthQuotaFooterProps> = ({
       quota={quota}
       loading={loading}
       refetch={refetch}
-      appIdForExpiredHint="codex_oauth"
+      idle={manualIdle}
       inline={inline}
       display={display}
     />

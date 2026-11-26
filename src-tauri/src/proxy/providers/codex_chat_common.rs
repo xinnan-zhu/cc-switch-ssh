@@ -99,6 +99,52 @@ pub(crate) fn extract_reasoning_summary_text(value: &Value) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
+/// 上游响应 `content` 里按顺序取出的一段正文或思考。
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ChatContentSegment {
+    Text(String),
+    Thinking(String),
+}
+
+/// 把上游响应的 `content` 拆成有序的正文 / 思考段，空段丢弃。
+///
+/// `content` 可以是字符串，也可以是分段数组：Mistral 开思考后返回
+/// `[{"type":"thinking","thinking":[{"type":"text","text":..}]}, {"type":"text","text":..}]`，
+/// 流式里数组和字符串会在同一条流里交替出现（#9902）。只认 text / output_text /
+/// thinking 三种段，refusal 等其余段由调用方自己处理。
+pub(crate) fn chat_content_segments(content: &Value) -> Vec<ChatContentSegment> {
+    match content {
+        Value::String(text) if !text.is_empty() => vec![ChatContentSegment::Text(text.clone())],
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|part| match part.get("type").and_then(Value::as_str) {
+                Some("text" | "output_text") => part
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.is_empty())
+                    .map(|text| ChatContentSegment::Text(text.to_string())),
+                Some("thinking") => chat_thinking_part_text(part).map(ChatContentSegment::Thinking),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// `{"type":"thinking"}` 段的思考文本。`thinking` 字段是字符串，或 TextChunk 数组
+/// （Mistral）；数组里是同一段思考的连续片段，直接拼接。
+pub(crate) fn chat_thinking_part_text(part: &Value) -> Option<String> {
+    let text = match part.get("thinking")? {
+        Value::String(text) => text.clone(),
+        Value::Array(chunks) => chunks
+            .iter()
+            .filter_map(|chunk| chunk.get("text").and_then(Value::as_str))
+            .collect(),
+        _ => return None,
+    };
+    (!text.is_empty()).then_some(text)
+}
+
 pub(crate) fn append_reasoning_content(message: &mut Map<String, Value>, reasoning: &str) -> bool {
     let reasoning = reasoning.trim();
     if reasoning.is_empty() {
@@ -168,7 +214,7 @@ pub(crate) fn tool_call_extra_content(source: &Value) -> Option<&Value> {
 }
 
 /// Gemini 文档给的跳过签名校验的占位值，只在真签名找不回来时兜底用（会影响模型表现）。
-const GEMINI_SKIP_THOUGHT_SIGNATURE: &str = "skip_thought_signature_validator";
+pub(crate) const GEMINI_SKIP_THOUGHT_SIGNATURE: &str = "skip_thought_signature_validator";
 
 /// 签名靠 CodexChatHistoryStore 在内存里补回，CC Switch 在一轮工具调用中途重启就丢了。
 /// Gemini 只校验当前轮（最后一条 user 消息之后）每个 assistant 步骤里第一个工具调用的签名，
@@ -230,7 +276,7 @@ pub(crate) fn fill_gemini_thought_signature_fallback(chat_body: &mut Value) -> u
 }
 
 /// 模型名（可带 `google/` 之类的中转前缀）是 Gemini 3 及以后的版本：这些版本才强制校验工具调用签名。
-fn requires_gemini_thought_signature(model: &str) -> bool {
+pub(crate) fn requires_gemini_thought_signature(model: &str) -> bool {
     let name = model
         .rsplit('/')
         .next()
@@ -318,6 +364,31 @@ mod tests {
             call["extra_content"] = extra;
         }
         call
+    }
+
+    #[test]
+    fn content_segments_keep_order_of_mistral_thinking_and_text_chunks() {
+        let content = json!([
+            {"type": "thinking", "thinking": [{"type": "text", "text": "We "}, {"type": "text", "text": "add"}], "closed": true},
+            {"type": "text", "text": "391"},
+            {"type": "thinking", "thinking": "plain"},
+            {"type": "text", "text": ""},
+            {"type": "image_url", "image_url": {"url": "x"}}
+        ]);
+        assert_eq!(
+            chat_content_segments(&content),
+            vec![
+                ChatContentSegment::Thinking("We add".to_string()),
+                ChatContentSegment::Text("391".to_string()),
+                ChatContentSegment::Thinking("plain".to_string()),
+            ]
+        );
+        assert_eq!(
+            chat_content_segments(&json!("hi")),
+            vec![ChatContentSegment::Text("hi".to_string())]
+        );
+        assert!(chat_content_segments(&json!("")).is_empty());
+        assert!(chat_content_segments(&Value::Null).is_empty());
     }
 
     #[test]

@@ -1,4 +1,4 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
@@ -10,6 +10,7 @@ import {
 import type { UsageRangeSelection } from "@/types/usage";
 import { setSettings } from "../msw/state";
 import { remoteUsageApi } from "@/lib/api/remoteUsage";
+import { createTestQueryClient } from "../utils/testQueryClient";
 
 const useProviderStatsMock = vi.hoisted(() => vi.fn());
 const useModelStatsMock = vi.hoisted(() => vi.fn());
@@ -151,11 +152,7 @@ vi.mock("@/lib/query/proxy", () => ({
 }));
 
 const renderDashboard = (props: ComponentProps<typeof UsageDashboard> = {}) => {
-  const queryClient = new QueryClient({
-    defaultOptions: {
-      queries: { retry: false },
-    },
-  });
+  const queryClient = createTestQueryClient();
   return render(
     <QueryClientProvider client={queryClient}>
       <UsageDashboard {...props} />
@@ -342,6 +339,30 @@ describe("UsageDashboard", () => {
     ).toBeInTheDocument();
   });
 
+  it("filters to Oh My Pi separately from Pi", async () => {
+    const user = userEvent.setup();
+    renderDashboard();
+
+    // Two products, two filters: the chip must query appType "omp" and must
+    // not be confused with Pi's.
+    await user.click(screen.getByRole("button", { name: "Oh My Pi" }));
+
+    await waitFor(() =>
+      expect(useProviderStatsMock).toHaveBeenLastCalledWith(
+        expect.anything(),
+        { appType: "omp" },
+        expect.anything(),
+      ),
+    );
+    expect(usageHeroMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ appType: "omp" }),
+    );
+    expect(screen.getByRole("button", { name: "Pi" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Oh My Pi", pressed: true }),
+    ).toBeInTheDocument();
+  });
+
   it("starts with the app filter passed in from an app page", () => {
     renderDashboard({ initialAppType: "codex" });
 
@@ -367,8 +388,12 @@ describe("UsageDashboard", () => {
         pi: false,
         mcode: false,
         kimi: false,
+        dsh: false,
         agy: false,
         omp: false,
+        copilot: false,
+        workbuddy: false,
+        codebuddy: false,
       },
     });
     renderDashboard({ initialAppType: "gemini" });
@@ -575,9 +600,7 @@ describe("UsageDashboard", () => {
   });
 
   it("does not scan until settings load, and never once they say scanning is off", async () => {
-    const client = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
+    const client = createTestQueryClient();
     const view = render(
       <QueryClientProvider client={client}>
         <UsageDashboard settingsReady={false} />

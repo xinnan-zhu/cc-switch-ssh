@@ -17,7 +17,7 @@ use super::remote_cli::REMOTE_PATH_PRELUDE;
 use super::SshConnectionTarget;
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
-use crate::proxy::usage::{CostCalculator, TokenUsage};
+use crate::proxy::usage::{calculator::CostCalculator, parser::TokenUsage};
 use crate::services::session_usage::SessionSyncResult;
 use crate::services::usage_stats::find_model_pricing;
 
@@ -442,7 +442,12 @@ mod tests {
 
     #[test]
     fn collectors_finish_once_stdin_is_sent() {
-        let config = serde_json::to_string(r#"{"roots":{},"cursors":{},"since":0}"#).unwrap();
+        // Explicit empty roots keep inherited CODEX_HOME / CLAUDE_CONFIG_DIR
+        // from making this pipe-lifecycle test scan the user's real sessions.
+        let config = serde_json::to_string(
+            r#"{"roots":{"claude":[],"codex":[],"gemini":[],"grokbuild":[]},"cursors":{},"since":0}"#,
+        )
+        .unwrap();
         if std::process::Command::new("python3")
             .arg("-V")
             .output()

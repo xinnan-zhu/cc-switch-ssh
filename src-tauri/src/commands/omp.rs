@@ -1,3 +1,4 @@
+use super::run_db_task;
 use crate::error::AppError;
 use crate::services::pi_state::PiCurrentState;
 use crate::store::AppState;
@@ -20,8 +21,13 @@ fn current_state(state: &AppState) -> Result<PiCurrentState, AppError> {
 }
 
 #[tauri::command]
-pub(crate) fn get_omp_current_state(state: State<'_, AppState>) -> Result<PiCurrentState, String> {
-    current_state(state.inner()).map_err(|error| error.to_string())
+pub(crate) async fn get_omp_current_state(
+    state: State<'_, AppState>,
+) -> Result<PiCurrentState, String> {
+    run_db_task(&state, |state| {
+        current_state(state).map_err(|error| error.to_string())
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -42,7 +48,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn state_exposes_explicit_providers_and_default() {
+    fn state_exposes_explicit_providers_and_tolerates_builtin_default() {
         let _agent = TestAgentDir::new();
         let state = AppState::new(Arc::new(Database::memory().unwrap()));
         write(
@@ -52,16 +58,10 @@ mod tests {
         let current = current_state(&state).unwrap();
         assert_eq!(current.enabled_provider_ids, vec!["managed", "native"]);
         assert_eq!(current.default_provider_id.as_deref(), Some("managed"));
-    }
 
-    #[test]
-    #[serial]
-    fn built_in_default_without_explicit_node_is_tolerated() {
-        let _agent = TestAgentDir::new();
-        let state = AppState::new(Arc::new(Database::memory().unwrap()));
         write("providers: {}\n", "modelRoles:\n  default: openai/gpt-4o\n");
-        let current = current_state(&state).unwrap();
-        assert!(current.enabled_provider_ids.is_empty());
-        assert_eq!(current.default_provider_id.as_deref(), Some("openai"));
+        let builtin = current_state(&state).unwrap();
+        assert!(builtin.enabled_provider_ids.is_empty());
+        assert_eq!(builtin.default_provider_id.as_deref(), Some("openai"));
     }
 }

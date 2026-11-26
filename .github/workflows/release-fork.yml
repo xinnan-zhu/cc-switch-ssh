@@ -20,7 +20,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
           - os: windows-2022
           - os: ubuntu-22.04
 
@@ -136,6 +136,7 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         env:
+          LINUXDEPLOY_EXCLUDED_LIBRARIES: "libwayland-client.so*"
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |

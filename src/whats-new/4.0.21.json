@@ -5,14 +5,14 @@
       "type": "fix",
       "zh": "远端网关保留所选 Codex 模型，6.1 Sol 不再被改成默认模型",
       "zh-TW": "遠端閘道保留所選 Codex 模型，6.1 Sol 不再被改成預設模型",
-      "en": "Remote gateways preserve the selected Codex model instead of replacing it with the provider default",
+      "en": "Remote gateways preserve the selected Codex model, including models outside the saved catalog",
       "ja": "リモートゲートウェイが選択した Codex モデルを保持し、既定モデルに置き換えないよう修正"
     },
     {
       "type": "fix",
       "zh": "远端 CLI 更新沿用服务器代理，并查找实际安装目录中的 npm",
       "zh-TW": "遠端 CLI 更新沿用伺服器代理，並尋找實際安裝目錄中的 npm",
-      "en": "Remote CLI updates inherit the server proxy and find npm in the actual installation directory",
+      "en": "Remote CLI updates inherit the server proxy and resolve npm from the actual install directory",
       "ja": "リモート CLI 更新でサーバーのプロキシを引き継ぎ、実際のインストール先から npm を検出"
     },
     {

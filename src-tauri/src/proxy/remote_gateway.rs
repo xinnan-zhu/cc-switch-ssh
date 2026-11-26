@@ -15,6 +15,7 @@ use hyper_util::rt::TokioIo;
 use rusqlite::OptionalExtension;
 use tokio::sync::oneshot;
 
+use crate::app_config::AppType;
 use crate::database::Database;
 use crate::error::AppError;
 use crate::provider::Provider;
@@ -119,7 +120,10 @@ pub fn remote_route(
         return Ok(RemoteRoute::FollowLocal);
     };
     Ok(
-        match db.get_all_providers(app_type)?.shift_remove(&provider_id) {
+        match db
+            .get_all_providers(&app_type.parse::<AppType>()?)?
+            .shift_remove(&provider_id)
+        {
             Some(provider) => RemoteRoute::Pinned(Box::new(provider)),
             None => {
                 log::warn!(
@@ -423,7 +427,7 @@ mod tests {
 
     fn routed_state(provider: &Provider, pinned: bool) -> crate::proxy::server::ProxyState {
         let db = std::sync::Arc::new(Database::memory().unwrap());
-        db.save_provider("codex", provider).unwrap();
+        db.save_provider(&AppType::Codex, provider).unwrap();
         {
             let conn = db.conn.lock().unwrap();
             conn.execute(
@@ -474,7 +478,7 @@ mod tests {
             let state = routed_state(&provider, pinned);
             state
                 .db
-                .set_current_provider("codex", &provider.id)
+                .set_current_provider(&AppType::Codex, &provider.id)
                 .unwrap();
             let server = crate::proxy::server::ProxyServer::new(
                 crate::proxy::types::ProxyConfig::default(),
@@ -489,7 +493,7 @@ mod tests {
                         .unwrap()
                         .remove("modelCatalog");
                 }
-                state.db.save_provider("codex", &row).unwrap();
+                state.db.save_provider(&AppType::Codex, &row).unwrap();
                 for endpoint in ["/v1/responses", "/v1/responses/compact"] {
                     for model in ["gpt-6.1-sol", "gpt-5.6-terra"] {
                         let request = http::Request::builder()
@@ -539,7 +543,11 @@ mod tests {
             None,
         );
         let state = routed_state(&provider, true);
-        let mut config = state.db.get_proxy_config_for_app("codex").await.unwrap();
+        let mut config = state
+            .db
+            .get_proxy_config_for_app(&AppType::Codex)
+            .await
+            .unwrap();
         config.auto_failover_enabled = true;
         state.db.update_proxy_config_for_app(config).await.unwrap();
         let ctx = REMOTE_ORIGIN
@@ -797,9 +805,9 @@ mod tests {
                 }}),
                 None,
             );
-            db.save_provider("gemini", &provider).unwrap();
+            db.save_provider(&AppType::Gemini, &provider).unwrap();
         }
-        db.set_current_provider("gemini", "b").unwrap();
+        db.set_current_provider(&AppType::Gemini, "b").unwrap();
         let server = crate::proxy::server::ProxyServer::new(
             crate::proxy::types::ProxyConfig::default(),
             db.clone(),

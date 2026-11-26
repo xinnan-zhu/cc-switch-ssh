@@ -40,7 +40,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PageTabs } from "@/components/ui/page-tabs";
 import { RemoteUsageCard } from "./RemoteUsageCard";
 import { RemoteCliCard } from "./RemoteCliCard";
@@ -867,169 +866,187 @@ export function RemoteProviderPage({
   return (
     <div className="mx-auto w-full max-w-[1040px] space-y-4">
       <section className="rounded-lg border border-border bg-card p-4">
-        <Tabs
-          value={connectionMode}
-          onValueChange={(value) => {
-            setConnectionMode(value as "config" | "manual");
-            setConnectedTarget(null);
-          }}
-        >
-          <TabsList className="mx-auto grid w-full max-w-[44rem] grid-cols-2 sm:w-[36rem]">
-            <TabsTrigger value="config">
-              {t("remote.configHostTab", { defaultValue: "SSH Host" })}
-            </TabsTrigger>
-            <TabsTrigger value="manual">
-              {t("remote.manualHostTab", {
-                defaultValue: "用户名/IP",
-              })}
-            </TabsTrigger>
-          </TabsList>
+        <div>
+          <PageTabs<"config" | "manual">
+            aria-label={t("remote.connect")}
+            idPrefix="remote-connection"
+            controls="remote-connection-panel"
+            value={connectionMode}
+            onValueChange={(value) => {
+              setConnectionMode(value);
+              setConnectedTarget(null);
+            }}
+            items={[
+              {
+                value: "config",
+                label: t("remote.configHostTab", { defaultValue: "SSH Host" }),
+              },
+              {
+                value: "manual",
+                label: t("remote.manualHostTab", { defaultValue: "用户名/IP" }),
+              },
+            ]}
+          />
 
-          <TabsContent value="config" className="mt-3 space-y-2">
-            <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
-              <div className="space-y-2">
-                <Label>
-                  {t("remote.hostLabel", {
-                    defaultValue: "SSH Host",
+          {connectionMode === "config" && (
+            <div
+              id="remote-connection-panel"
+              role="tabpanel"
+              aria-labelledby="remote-connection-config"
+              className="mt-3 space-y-2"
+            >
+              <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+                <div className="space-y-2">
+                  <Label>
+                    {t("remote.hostLabel", {
+                      defaultValue: "SSH Host",
+                    })}
+                  </Label>
+                  {hostsQuery.isLoading ? (
+                    <div className="h-10 rounded-md border border-dashed border-border px-3 py-2 text-sm text-muted-foreground">
+                      {t("remote.hostsLoading", {
+                        defaultValue: "正在读取 ~/.ssh/config...",
+                      })}
+                    </div>
+                  ) : hostsQuery.data && hostsQuery.data.length > 0 ? (
+                    <Select
+                      value={selectedHost}
+                      onValueChange={(value) => {
+                        setSelectedHost(value);
+                        setConnectedTarget(null);
+                      }}
+                    >
+                      <SelectTrigger>
+                        <SelectValue
+                          placeholder={t("remote.hostPlaceholder", {
+                            defaultValue: "选择 SSH Host",
+                          })}
+                        />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {hostsQuery.data.map((host) => (
+                          <SelectItem key={host.alias} value={host.alias}>
+                            {formatHostLabel(host)}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  ) : (
+                    <div className="h-10 rounded-md border border-dashed border-border px-3 py-2 text-sm text-muted-foreground">
+                      {t("remote.hostsEmpty", {
+                        defaultValue: "没有在 ~/.ssh/config 中找到可用 Host。",
+                      })}
+                    </div>
+                  )}
+                </div>
+                {renderConnectionActions("sm:justify-end")}
+              </div>
+            </div>
+          )}
+
+          {connectionMode === "manual" && (
+            <div
+              id="remote-connection-panel"
+              role="tabpanel"
+              aria-labelledby="remote-connection-manual"
+              className="mt-3 space-y-2"
+            >
+              <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+                <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,0.75fr)_5.5rem_minmax(0,0.85fr)]">
+                  <div className="space-y-2">
+                    <Label htmlFor="remote-manual-host">
+                      {t("remote.manualHost", {
+                        defaultValue: "IP / 域名",
+                      })}
+                    </Label>
+                    <Input
+                      id="remote-manual-host"
+                      value={manualHost}
+                      onChange={(event) => {
+                        setManualHost(event.target.value);
+                        setConnectedTarget(null);
+                      }}
+                      placeholder={t("remote.manualHostPlaceholder", {
+                        defaultValue: "192.168.1.10",
+                      })}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="remote-manual-user">
+                      {t("remote.manualUser", {
+                        defaultValue: "用户名",
+                      })}
+                    </Label>
+                    <Input
+                      id="remote-manual-user"
+                      value={manualUser}
+                      onChange={(event) => {
+                        setManualUser(event.target.value);
+                        setConnectedTarget(null);
+                      }}
+                      placeholder={t("remote.manualUserPlaceholder", {
+                        defaultValue: "root",
+                      })}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="remote-manual-port">
+                      {t("remote.manualPort", {
+                        defaultValue: "端口",
+                      })}
+                    </Label>
+                    <Input
+                      id="remote-manual-port"
+                      type="text"
+                      inputMode="numeric"
+                      pattern="[0-9]*"
+                      value={manualPort}
+                      onChange={(event) => {
+                        setManualPort(event.target.value);
+                        setConnectedTarget(null);
+                      }}
+                      placeholder="22"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="remote-manual-password">
+                      {t("remote.manualPassword", {
+                        defaultValue: "密码",
+                      })}
+                    </Label>
+                    <Input
+                      id="remote-manual-password"
+                      type="password"
+                      value={manualPassword}
+                      onChange={(event) => {
+                        setManualPassword(event.target.value);
+                        setConnectedTarget(null);
+                      }}
+                      autoComplete="off"
+                      placeholder={t("remote.manualPasswordPlaceholder", {
+                        defaultValue: "可选",
+                      })}
+                    />
+                  </div>
+                </div>
+                {renderConnectionActions("sm:justify-end")}
+              </div>
+              {manualPortNumber === null && (
+                <p className="text-xs text-destructive">
+                  {t("remote.manualPortInvalid", {
+                    defaultValue: "端口必须在 1-65535 之间。",
                   })}
-                </Label>
-                {hostsQuery.isLoading ? (
-                  <div className="h-10 rounded-md border border-dashed border-border px-3 py-2 text-sm text-muted-foreground">
-                    {t("remote.hostsLoading", {
-                      defaultValue: "正在读取 ~/.ssh/config...",
-                    })}
-                  </div>
-                ) : hostsQuery.data && hostsQuery.data.length > 0 ? (
-                  <Select
-                    value={selectedHost}
-                    onValueChange={(value) => {
-                      setSelectedHost(value);
-                      setConnectedTarget(null);
-                    }}
-                  >
-                    <SelectTrigger>
-                      <SelectValue
-                        placeholder={t("remote.hostPlaceholder", {
-                          defaultValue: "选择 SSH Host",
-                        })}
-                      />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {hostsQuery.data.map((host) => (
-                        <SelectItem key={host.alias} value={host.alias}>
-                          {formatHostLabel(host)}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                ) : (
-                  <div className="h-10 rounded-md border border-dashed border-border px-3 py-2 text-sm text-muted-foreground">
-                    {t("remote.hostsEmpty", {
-                      defaultValue: "没有在 ~/.ssh/config 中找到可用 Host。",
-                    })}
-                  </div>
-                )}
-              </div>
-              {renderConnectionActions("sm:justify-end")}
-            </div>
-          </TabsContent>
-
-          <TabsContent value="manual" className="mt-3 space-y-2">
-            <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
-              <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,0.75fr)_5.5rem_minmax(0,0.85fr)]">
-                <div className="space-y-2">
-                  <Label htmlFor="remote-manual-host">
-                    {t("remote.manualHost", {
-                      defaultValue: "IP / 域名",
-                    })}
-                  </Label>
-                  <Input
-                    id="remote-manual-host"
-                    value={manualHost}
-                    onChange={(event) => {
-                      setManualHost(event.target.value);
-                      setConnectedTarget(null);
-                    }}
-                    placeholder={t("remote.manualHostPlaceholder", {
-                      defaultValue: "192.168.1.10",
-                    })}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="remote-manual-user">
-                    {t("remote.manualUser", {
-                      defaultValue: "用户名",
-                    })}
-                  </Label>
-                  <Input
-                    id="remote-manual-user"
-                    value={manualUser}
-                    onChange={(event) => {
-                      setManualUser(event.target.value);
-                      setConnectedTarget(null);
-                    }}
-                    placeholder={t("remote.manualUserPlaceholder", {
-                      defaultValue: "root",
-                    })}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="remote-manual-port">
-                    {t("remote.manualPort", {
-                      defaultValue: "端口",
-                    })}
-                  </Label>
-                  <Input
-                    id="remote-manual-port"
-                    type="text"
-                    inputMode="numeric"
-                    pattern="[0-9]*"
-                    value={manualPort}
-                    onChange={(event) => {
-                      setManualPort(event.target.value);
-                      setConnectedTarget(null);
-                    }}
-                    placeholder="22"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="remote-manual-password">
-                    {t("remote.manualPassword", {
-                      defaultValue: "密码",
-                    })}
-                  </Label>
-                  <Input
-                    id="remote-manual-password"
-                    type="password"
-                    value={manualPassword}
-                    onChange={(event) => {
-                      setManualPassword(event.target.value);
-                      setConnectedTarget(null);
-                    }}
-                    autoComplete="off"
-                    placeholder={t("remote.manualPasswordPlaceholder", {
-                      defaultValue: "可选",
-                    })}
-                  />
-                </div>
-              </div>
-              {renderConnectionActions("sm:justify-end")}
-            </div>
-            {manualPortNumber === null && (
-              <p className="text-xs text-destructive">
-                {t("remote.manualPortInvalid", {
-                  defaultValue: "端口必须在 1-65535 之间。",
+                </p>
+              )}
+              <p className="text-xs text-muted-foreground">
+                {t("remote.manualPasswordHint", {
+                  defaultValue:
+                    "密码仅用于本次 SSH 连接，不会保存到本地配置或数据库。",
                 })}
               </p>
-            )}
-            <p className="text-xs text-muted-foreground">
-              {t("remote.manualPasswordHint", {
-                defaultValue:
-                  "密码仅用于本次 SSH 连接，不会保存到本地配置或数据库。",
-              })}
-            </p>
-          </TabsContent>
-        </Tabs>
+            </div>
+          )}
+        </div>
 
         {connectionMode === "config" && selectedHostInfo?.source && (
           <p className="mt-2 text-xs text-muted-foreground">

@@ -220,7 +220,7 @@ impl RemoteProviderService {
         let _in_flight = InFlightGuard::acquire(format!("{host_alias}\n{}", app_type.as_str()))
             .ok_or_else(|| AppError::Message(format!("远端 {host_alias} 正在切换中，请稍候")))?;
 
-        let providers = state.db.get_all_providers(app_type.as_str())?;
+        let providers = state.db.get_all_providers(&app_type)?;
         let provider = providers
             .get(provider_id)
             .ok_or_else(|| AppError::Message(format!("供应商 {provider_id} 不存在")))?;
@@ -307,7 +307,7 @@ impl RemoteProviderService {
         if let Some(existing_id) =
             find_matching_local_provider(state, &app_type, &snapshot, Some(&settings_config))?
         {
-            let providers = state.db.get_all_providers(app_type.as_str())?;
+            let providers = state.db.get_all_providers(&app_type)?;
             let provider = providers
                 .get(&existing_id)
                 .cloned()
@@ -334,7 +334,7 @@ impl RemoteProviderService {
             app_type.as_str()
         ));
 
-        state.db.save_provider(app_type.as_str(), &provider)?;
+        state.db.save_provider(&app_type, &provider)?;
 
         Ok(RemoteImportResult {
             host_alias: host_alias.to_string(),
@@ -656,10 +656,7 @@ pub(super) fn matched_remote_provider(
     else {
         return Ok(None);
     };
-    Ok(state
-        .db
-        .get_all_providers(app_type.as_str())?
-        .shift_remove(&id))
+    Ok(state.db.get_all_providers(app_type)?.shift_remove(&id))
 }
 
 /// A local provider matches when it was imported verbatim from the remote, or
@@ -670,7 +667,7 @@ fn find_matching_local_provider(
     snapshot: &RemoteSnapshot,
     remote_settings: Option<&Value>,
 ) -> Result<Option<String>, AppError> {
-    let providers = state.db.get_all_providers(app_type.as_str())?;
+    let providers = state.db.get_all_providers(app_type)?;
 
     if let Some(remote_settings) = remote_settings {
         if let Some(id) = providers
@@ -835,7 +832,7 @@ fn generate_remote_provider_id(
     app_type: &AppType,
     host_alias: &str,
 ) -> Result<String, AppError> {
-    let existing_ids = state.db.get_provider_ids(app_type.as_str())?;
+    let existing_ids = state.db.get_provider_ids(app_type)?;
     let base = format!(
         "remote-{}-{}",
         app_type.as_str(),

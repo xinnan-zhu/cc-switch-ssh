@@ -641,7 +641,7 @@ fn routed_provider(
     provider_id: Option<&str>,
 ) -> Result<Option<Provider>, AppError> {
     match provider_id {
-        Some(id) => state.db.get_provider_by_id(id, app.as_str()),
+        Some(id) => state.db.get_provider_by_id(id, app),
         None => crate::mode::current::provider_in_use(&state.db, app),
     }
 }
@@ -656,7 +656,7 @@ fn validate_pinned_provider(
     };
     let provider = state
         .db
-        .get_all_providers(app.as_str())?
+        .get_all_providers(app)?
         .shift_remove(provider_id)
         .ok_or_else(|| AppError::Message(format!("供应商 {provider_id} 不存在")))?;
     if !provider_usable_remotely(&provider) {
@@ -703,7 +703,15 @@ fn build_gateway_writes(
             let route = provider
                 .map(|provider| ClaudeProjection::of(&provider.settings_config))
                 .unwrap_or_default();
-            let mut projection = proxy_projection(&route, &url, ProxyAuth::FollowRow, None);
+            let mut projection = proxy_projection(
+                &route,
+                provider
+                    .map(|p| p.name.as_str())
+                    .unwrap_or("Remote gateway"),
+                &url,
+                ProxyAuth::AuthToken,
+                None,
+            );
             for value in projection.env.values_mut() {
                 if value.as_str() == Some(PROXY_TOKEN_PLACEHOLDER) {
                     *value = Value::String(record.token.clone());

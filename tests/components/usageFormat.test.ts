@@ -14,11 +14,16 @@ import {
   formatTokensPerSecond,
   formatTokensShort,
   resolveMoneyDisplay,
+  resolveRateProvider,
+  resolveRateSource,
+  shouldRefreshRates,
   resolveSidebarToday,
   getAggregateTokensPerSecond,
   getEstimatedTokensPerSecond,
   getOutputTokensPerSecond,
   getLocaleFromLanguage,
+  joinNames,
+  joinClauses,
   sumSpeedTotals,
   USD_DISPLAY,
 } from "@/components/usage/format";
@@ -42,6 +47,49 @@ describe("usage format helpers", () => {
     ).toBe(125);
   });
 
+  it.each(["zha", "zhb-CN", "jam", "trv-TW"])(
+    "does not apply another language's formatting to %s",
+    (language) => {
+      expect(getLocaleFromLanguage(language)).toBe("en-US");
+      expect(formatTokensShort(10_000, language)).toBe("10.0K");
+      expect(joinNames(["A", "B"], language)).toBe("A, B");
+      expect(joinClauses(["A", "B"], language)).toBe("A; B");
+    },
+  );
+
+  it.each([
+    ["zh-TW-u-nu-hanidec", "zh-TW"],
+    ["zh-Hant-TW", "zh-TW"],
+    ["zh-HK", "zh-TW"],
+    ["zh-hantx", "zh-CN"],
+    ["zh-hkx", "zh-CN"],
+  ])(
+    "respects Chinese script and region boundaries for %s",
+    (language, expected) => {
+      expect(getLocaleFromLanguage(language)).toBe(expected);
+    },
+  );
+
+  it("formats Korean token counts with Korean units and separators", () => {
+    expect(formatTokensShort(9_999, "ko")).toBe("9,999");
+    expect(formatTokensShort(10_000, "ko")).toBe("1.0만");
+    expect(formatTokensShort(12_345, "ko-KR", 2)).toBe("1.23만");
+    expect(formatTokensShort(100_000_000, "ko")).toBe("1.00억");
+    expect(formatTokensShort(123_456_789, "ko_KR")).toBe("1.23억");
+  });
+
+  it("resolves Korean date locales", () => {
+    expect(getLocaleFromLanguage("ko")).toBe("ko-KR");
+    expect(getLocaleFromLanguage("ko-KR")).toBe("ko-KR");
+  });
+  it.each(["kok", "kok-IN", "kos"])(
+    "does not apply Korean date or token formats to %s",
+    (language) => {
+      expect(getLocaleFromLanguage(language)).toBe("en-US");
+      expect(formatTokensShort(10_000, language)).toBe("10.0K");
+      expect(formatTokensShort(100_000_000, language)).toBe("100.00M");
+    },
+  );
   it("formats Traditional Chinese token units with Traditional characters", () => {
     expect(formatTokensShort(12_345, "zh-TW")).toBe("1.2 萬");
     expect(formatTokensShort(123_456_789, "zh-Hant", 2)).toBe("1.23 億");
@@ -133,7 +181,7 @@ describe("usage format helpers", () => {
     ).toBeNull();
   });
 
-  it("hides speed when the generation window is a transport burst", () => {
+  it("hides speed when the generation window is a transport or buffered burst", () => {
     // 2842 tps 实例：输出在首字后 19ms 内全部到达，算出来的是传输突发
     expect(
       getOutputTokensPerSecond({
@@ -142,6 +190,23 @@ describe("usage format helpers", () => {
         firstTokenMs: 3_425,
       }),
     ).toBeNull();
+    // 超过 10,000 tok/s 上限：1001 token / 100ms = 10,010 tok/s
+    expect(
+      getOutputTokensPerSecond({
+        outputTokens: 1_001,
+        latencyMs: 200,
+        firstTokenMs: 100,
+      }),
+    ).toBeNull();
+    // 正常短快回复（如 Haiku 工具调用：首字 2.5s，600ms 输出 200 token -> 333.3 tok/s）不应误杀
+    expect(
+      getOutputTokensPerSecond({
+        outputTokens: 200,
+        latencyMs: 3_100,
+        firstTokenMs: 2_500,
+      }),
+    ).toBeCloseTo(333.333, 2);
+    // 100ms 生成 150 token -> 1500 tok/s（未超过 10,000 tok/s 上限）
     expect(
       getOutputTokensPerSecond({
         outputTokens: 150,
@@ -149,6 +214,42 @@ describe("usage format helpers", () => {
         firstTokenMs: 1_000,
       }),
     ).toBe(1500);
+  });
+
+  it("excludes non-2xx requests from exact and estimated speed", () => {
+    expect(
+      getOutputTokensPerSecond({
+        outputTokens: 500,
+        latencyMs: 6_000,
+        firstTokenMs: 1_000,
+        statusCode: 500,
+      }),
+    ).toBeNull();
+    expect(
+      getOutputTokensPerSecond({
+        outputTokens: 500,
+        latencyMs: 6_000,
+        firstTokenMs: 1_000,
+        statusCode: 200,
+      }),
+    ).toBe(100);
+    expect(
+      getEstimatedTokensPerSecond({
+        outputTokens: 1_000,
+        latencyMs: 10_000,
+        dataSource: "pi_session",
+        statusCode: 499,
+      }),
+    ).toBeNull();
+    // 估算速度也受 10,000 tok/s 上限保护
+    expect(
+      getEstimatedTokensPerSecond({
+        outputTokens: 20_000,
+        latencyMs: 1_500,
+        dataSource: "session_log",
+        statusCode: 200,
+      }),
+    ).toBeNull();
   });
 
   it("formats speed with integer or single-decimal precision", () => {
@@ -285,6 +386,27 @@ describe("usage money formatting", () => {
 });
 
 describe("display currency", () => {
+  it("converts won with preset or saved rates and preserves small costs", () => {
+    expect(resolveMoneyDisplay({ currency: "KRW" })).toEqual({
+      currency: "KRW",
+      rate: 1325,
+    });
+    const krw = resolveMoneyDisplay({
+      currency: "KRW",
+      exchangeRates: { KRW: 1400 },
+    });
+    expect(krw).toEqual({ currency: "KRW", rate: 1400 });
+    expect(formatMoney(2, 2, krw)).toBe("₩2,800");
+    expect(formatMoney(0.0012, 4, krw)).toBe("₩1.68");
+    expect(formatMoney(0.000001, 4, krw)).toBe("₩0.0014");
+    expect(formatMoneyShort(0.5, krw)).toBe("₩700");
+    expect(formatMoneyCompact(0.001, krw)).toBe("₩1.40");
+    expect(formatMoneyTick(20000, krw)).toBe("₩20,000");
+    expect(
+      resolveMoneyDisplay({ currency: "KRW", exchangeRates: { KRW: 0 } }),
+    ).toEqual({ currency: "KRW", rate: 1325 });
+  });
+
   it("falls back to USD and the preset rate for unusable settings", () => {
     expect(resolveMoneyDisplay(undefined)).toEqual(USD_DISPLAY);
     expect(resolveMoneyDisplay({ currency: "GBP" })).toEqual(USD_DISPLAY);
@@ -305,6 +427,101 @@ describe("display currency", () => {
     expect(
       resolveMoneyDisplay({ currency: "CNY", exchangeRates: { CNY: 7.25 } }),
     ).toEqual({ currency: "CNY", rate: 7.25 });
+  });
+
+  it("prefers the fetched rate in automatic mode and keeps manual values as fallback", () => {
+    const both = {
+      currency: "CNY",
+      rateSource: "auto",
+      autoExchangeRates: { CNY: 6.9 },
+      exchangeRates: { CNY: 7.1 },
+    };
+    expect(resolveMoneyDisplay(both)).toEqual({ currency: "CNY", rate: 6.9 });
+
+    // 还没取到自动汇率时先用手填值，再退预置值
+    expect(
+      resolveMoneyDisplay({ ...both, autoExchangeRates: undefined }),
+    ).toEqual({ currency: "CNY", rate: 7.1 });
+    expect(
+      resolveMoneyDisplay({ currency: "CNY", rateSource: "auto" }),
+    ).toEqual({ currency: "CNY", rate: 6.8 });
+
+    // 手动模式不看自动取到的值
+    expect(resolveMoneyDisplay({ ...both, rateSource: "manual" })).toEqual({
+      currency: "CNY",
+      rate: 7.1,
+    });
+    // 没设置过来源按手动：用量页本来不联网，不能升级后一进来就发请求
+    expect(resolveRateSource({ currency: "CNY" })).toBe("manual");
+    expect(resolveRateSource({ currency: "CNY", rateSource: "bogus" })).toBe(
+      "manual",
+    );
+    expect(resolveRateSource({ currency: "CNY", rateSource: "manual" })).toBe(
+      "manual",
+    );
+    expect(resolveRateSource({ currency: "CNY", rateSource: "auto" })).toBe(
+      "auto",
+    );
+  });
+
+  it("names the provider that actually served the automatic rate", () => {
+    // open.er-api.com 的免费条款要求署名 ExchangeRate-API（旧缓存没有 source 也按主源）
+    expect(resolveRateProvider("open.er-api.com")).toEqual({
+      name: "ExchangeRate-API",
+      url: "https://www.exchangerate-api.com/",
+    });
+    expect(resolveRateProvider(undefined)).toEqual({
+      name: "ExchangeRate-API",
+      url: "https://www.exchangerate-api.com/",
+    });
+    // 主源失败退到备用源时署它自己的名字
+    expect(resolveRateProvider("floatrates.com")).toEqual({
+      name: "FloatRates",
+      url: "https://www.floatrates.com/",
+    });
+  });
+
+  it("keeps fetched automatic rates out of the manual default unless picked", () => {
+    // 没设置过来源：自动取到的值不参与显示，用手填值或预置值
+    const fetched = {
+      currency: "CNY",
+      autoExchangeRates: { CNY: 6.9 },
+    };
+    expect(resolveRateSource(fetched)).toBe("manual");
+    expect(resolveMoneyDisplay(fetched)).toEqual({
+      currency: "CNY",
+      rate: 6.8,
+    });
+    expect(
+      resolveMoneyDisplay({ ...fetched, exchangeRates: { CNY: 7.1 } }),
+    ).toEqual({ currency: "CNY", rate: 7.1 });
+    // 用户主动选了自动才用取到的值
+    expect(resolveMoneyDisplay({ ...fetched, rateSource: "auto" })).toEqual({
+      currency: "CNY",
+      rate: 6.9,
+    });
+  });
+
+  it("refreshes automatic rates only when the cache is missing or stale", () => {
+    const now = 1_700_000_000_000;
+    const day = 24 * 60 * 60 * 1000;
+    expect(shouldRefreshRates({ rateSource: "auto" }, now)).toBe(true);
+    expect(
+      shouldRefreshRates(
+        { rateSource: "auto", rateFetchedAt: now - 60_000 },
+        now,
+      ),
+    ).toBe(false);
+    expect(
+      shouldRefreshRates({ rateSource: "auto", rateFetchedAt: now - day }, now),
+    ).toBe(true);
+    // 手动模式再旧也不联网
+    expect(
+      shouldRefreshRates(
+        { rateSource: "manual", rateFetchedAt: now - day },
+        now,
+      ),
+    ).toBe(false);
   });
 
   it("writes converted amounts with the plain currency symbol", () => {

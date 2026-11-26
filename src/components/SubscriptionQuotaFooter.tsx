@@ -18,8 +18,6 @@ import {
   type QuotaLine,
 } from "@/components/quota/quotaRules";
 
-export { countdownStr } from "@/components/quota/quotaRules";
-
 interface SubscriptionQuotaFooterProps {
   appId: AppId;
   inline?: boolean;
@@ -32,13 +30,18 @@ interface SubscriptionQuotaViewProps {
   loading: boolean;
   /** 原样传 refetch：额度列靠它返回的结果判断点击重查的成败 */
   refetch: () => unknown;
-  /** 用于 `subscription.expiredHint` 的 {tool} 插值；解耦了 hook 的 appId */
-  appIdForExpiredHint: string;
+  /**
+   * 用于 `subscription.expiredHint` 的 {tool} 插值（CLI 命令名）；解耦了 hook 的 appId。
+   * 不传＝账号由 CC Switch 自管（Codex / xAI OAuth），没有 CLI 命令可跑，提示改为去授权中心重新登录
+   */
+  appIdForExpiredHint?: string;
   inline?: boolean;
   /** 按档写剩余还是已用；由外层按设置传入，这里不读设置（见 useQuotaDisplay） */
   display?: QuotaDisplay;
   /** 查询成功但一档都没有时写的一句（Kimi 没订阅的号返回空对象）；不给时不显示 */
   emptyText?: string;
+  /** 只手动查询、还没查过（hook 的 manualIdle）：写「点刷新查询额度」 */
+  idle?: boolean;
 }
 
 /** 已知 tier 名称的显示映射（官方订阅 + Token Plan 共用） */
@@ -54,9 +57,10 @@ export const TIER_I18N_KEYS: Record<string, string> = {
   gemini_pro: "subscription.geminiPro",
   gemini_flash: "subscription.geminiFlash",
   gemini_flash_lite: "subscription.geminiFlashLite",
-  // Antigravity：Gemini 一组、Claude 和 GPT 一组，各有 5 小时和每周两档
+  // Antigravity：Gemini 一组、Claude 和 GPT 一组，各有 5 小时和每周两档；Pro 档另有 Argon 每周
   agy_gemini_five_hour: "subscription.agyGeminiFiveHour",
   agy_gemini_weekly: "subscription.agyGeminiWeekly",
+  agy_gemini_argon_weekly: "subscription.agyGeminiArgonWeekly",
   agy_third_party_five_hour: "subscription.agyThirdPartyFiveHour",
   agy_third_party_weekly: "subscription.agyThirdPartyWeekly",
   // Token Plan（five_hour 已在上方官方映射中）
@@ -74,11 +78,13 @@ const HIDDEN_INLINE_TIERS = new Set(["seven_day_sonnet"]);
 
 /**
  * 卡片上按组只留剩余最少的一档、标签写组名（展开时仍逐档列出）：
- * Antigravity 的 Gemini、Claude 和 GPT 两组各有 5 小时和每周两档，四档在卡片上放不下
+ * Antigravity 的 Gemini、Claude 和 GPT 两组各有 5 小时和每周两档（Pro 档 Gemini 组另有 Argon 每周），
+ * 四五档在卡片上放不下。Argon 也算进 Gemini 组，卡片始终两行、位置不随用量跳
  */
 const INLINE_TIER_GROUPS: Record<string, string> = {
   agy_gemini_five_hour: "subscription.agyGemini",
   agy_gemini_weekly: "subscription.agyGemini",
+  agy_gemini_argon_weekly: "subscription.agyGemini",
   agy_third_party_five_hour: "subscription.agyThirdParty",
   agy_third_party_weekly: "subscription.agyThirdParty",
 };
@@ -214,6 +220,40 @@ export function quotaFailureReason(
   return quota.error || t("subscription.queryFailed");
 }
 
+/** 「额度只在手动刷新时查询」开着、还没查过时的占位：一句灰字 + 刷新 */
+export function ManualQuotaIdle({
+  inline,
+  loading = false,
+  refetch,
+}: {
+  inline: boolean;
+  loading?: boolean;
+  refetch: () => unknown;
+}) {
+  const { t } = useTranslation();
+  const text = t("quota.manualIdle");
+  if (inline) {
+    return (
+      <QuotaLines
+        lines={[{ key: "idle", left: Infinity, tone: "muted", text }]}
+        queriedAt={null}
+        loading={loading}
+        onRefresh={refetch}
+      />
+    );
+  }
+  return (
+    <QuotaBars
+      className="mt-3"
+      title={t("subscription.title")}
+      rows={[]}
+      loading={loading}
+      onRefresh={refetch}
+      footer={<p className="text-caption text-fg-3">{text}</p>}
+    />
+  );
+}
+
 /**
  * 纯展示组件：渲染 SubscriptionQuota 的状态（not_found / parse_error 不显示；
  * 登录过期 / 令牌待刷新 / 查询失败写「额度查询失败」+ 原因；成功按档写剩余或已用），支持卡片（inline）和展开两种布局。
@@ -230,15 +270,23 @@ export const SubscriptionQuotaView: React.FC<SubscriptionQuotaViewProps> = ({
   inline = false,
   display = "left",
   emptyText,
+  idle = false,
 }) => {
   const { t, i18n } = useTranslation();
+
+  // 只手动查询、还没查过：写一句提示，点刷新再查（首次手动加载期间也保留占位让图标转圈）
+  if (!quota && idle) {
+    return (
+      <ManualQuotaIdle inline={inline} loading={loading} refetch={refetch} />
+    );
+  }
 
   // 无凭据 / 凭据解析错误 → 不显示（静默）
   if (!quota || quota.credentialStatus === "not_found") return null;
   if (quota.credentialStatus === "parse_error") return null;
 
   if (!quota.success) {
-    // 登录过期和令牌待刷新都是运行一次 CLI 就能解决，展开时给同一条提示
+    // 登录过期和令牌待刷新都是重新登录一次就能解决，展开时给同一条提示
     const expired =
       quota.credentialStatus === "expired" ||
       quota.credentialStatus === "refresh_pending";
@@ -268,7 +316,9 @@ export const SubscriptionQuotaView: React.FC<SubscriptionQuotaViewProps> = ({
             </span>{" "}
             <span className="text-fg-3">
               {expired
-                ? t("subscription.expiredHint", { tool: appIdForExpiredHint })
+                ? appIdForExpiredHint
+                  ? t("subscription.expiredHint", { tool: appIdForExpiredHint })
+                  : t("subscription.expiredHintAccounts")
                 : reason}
             </span>
           </p>
@@ -365,6 +415,7 @@ const SubscriptionQuotaFooter: React.FC<SubscriptionQuotaFooterProps> = ({
     data: quota,
     isFetching: loading,
     refetch,
+    manualIdle,
   } = useSubscriptionQuota(
     appId,
     isCurrent,
@@ -379,6 +430,7 @@ const SubscriptionQuotaFooter: React.FC<SubscriptionQuotaFooterProps> = ({
       quota={quota}
       loading={loading}
       refetch={refetch}
+      idle={manualIdle}
       // expiredHint 里的 {tool} 是 CLI 命令名：Grok 的命令是 `grok` 而非 appId
       appIdForExpiredHint={appId === "grokbuild" ? "grok" : appId}
       inline={inline}

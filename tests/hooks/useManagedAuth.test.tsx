@@ -101,6 +101,86 @@ describe("useManagedAuth", () => {
     unmount();
   });
 
+  it("copies the Claude sign-in link when the browser is not to be opened", async () => {
+    const { copyText } = await import("@/lib/clipboard");
+    const { settingsApi } = await import("@/lib/api");
+    vi.mocked(copyText).mockClear();
+    vi.mocked(settingsApi.openExternal).mockClear();
+    window.localStorage.setItem("cc-switch.authCenter.openBrowser", "0");
+    apiMocks.authPollForAccount.mockResolvedValue(null);
+    apiMocks.authStartLogin.mockResolvedValue({
+      provider: "claude_official",
+      device_code: "flow-1",
+      user_code: "",
+      verification_uri: "https://claude.com/cai/oauth/authorize?state=s",
+      expires_in: 900,
+      interval: 1,
+    });
+    const { result, unmount } = renderHook(
+      () => useManagedAuth("claude_official"),
+      { wrapper: createWrapper() },
+    );
+    await waitFor(() => expect(result.current.isStatusSuccess).toBe(true));
+    act(() => result.current.addAccount());
+    await waitFor(() => expect(result.current.isPolling).toBe(true));
+    // Windows 上 Claude Code 自己开浏览器，要告诉后端别开
+    expect(apiMocks.authStartLogin).toHaveBeenCalledWith(
+      "claude_official",
+      undefined,
+      undefined,
+      "copy_link",
+    );
+    await waitFor(() =>
+      expect(copyText).toHaveBeenCalledWith(
+        "https://claude.com/cai/oauth/authorize?state=s",
+      ),
+    );
+    expect(settingsApi.openExternal).not.toHaveBeenCalled();
+    act(() => result.current.cancelAuth());
+    unmount();
+    window.localStorage.removeItem("cc-switch.authCenter.openBrowser");
+  });
+
+  it("copies only the link, not the device code, when the browser is not to be opened", async () => {
+    const { copyText } = await import("@/lib/clipboard");
+    const { settingsApi } = await import("@/lib/api");
+    vi.mocked(copyText).mockClear();
+    vi.mocked(settingsApi.openExternal).mockClear();
+    window.localStorage.setItem("cc-switch.authCenter.openBrowser", "0");
+    apiMocks.authPollForAccount.mockRejectedValue(new Error("pending"));
+    apiMocks.authStartLogin.mockResolvedValue({
+      provider: "codex_oauth",
+      device_code: "device-1",
+      user_code: "ABCD-EFGH",
+      verification_uri: "https://auth.openai.com/codex/device",
+      expires_in: 900,
+      interval: 5,
+    });
+    const { result, unmount } = renderHook(
+      () => useManagedAuth("codex_oauth", undefined, "device_code"),
+      { wrapper: createWrapper() },
+    );
+    await waitFor(() => expect(result.current.isStatusSuccess).toBe(true));
+    act(() => result.current.addAccount());
+    await waitFor(() => expect(result.current.isPolling).toBe(true));
+    expect(apiMocks.authStartLogin).toHaveBeenCalledWith(
+      "codex_oauth",
+      undefined,
+      undefined,
+      "device_code",
+    );
+    await waitFor(() =>
+      expect(copyText).toHaveBeenCalledWith(
+        "https://auth.openai.com/codex/device",
+      ),
+    );
+    expect(copyText).not.toHaveBeenCalledWith("ABCD-EFGH");
+    expect(settingsApi.openExternal).not.toHaveBeenCalled();
+    act(() => result.current.cancelAuth());
+    unmount();
+    window.localStorage.removeItem("cc-switch.authCenter.openBrowser");
+  });
+
   beforeEach(() => {
     apiMocks.authGetStatus.mockReset().mockResolvedValue({
       provider: "codex_oauth",
@@ -543,5 +623,68 @@ describe("useManagedAuth", () => {
     await waitFor(() =>
       expect(toastMocks.success).toHaveBeenCalledWith("账号已移除"),
     );
+  });
+
+  // 移除/登出的 xAI 号若正是 Grok CLI 当前登录，后端会让出 CLI 登录；
+  // 没绑号的 Grok 官方卡查的就是 CLI 当前登录，成功失败都要重查
+  it.each([
+    ["remove", false],
+    ["remove", true],
+    ["logout", false],
+    ["logout", true],
+  ] as const)(
+    "invalidates the Grok CLI quota after xAI %s (failed=%s)",
+    async (operation, fails) => {
+      const queryClient = new QueryClient({
+        defaultOptions: {
+          queries: { retry: false },
+          mutations: { retry: false },
+        },
+      });
+      const quotaKey = ["subscription", "quota", "grokbuild"];
+      queryClient.setQueryData(quotaKey, { success: true, tiers: [] });
+      const { result } = renderHook(() => useManagedAuth("xai_oauth"), {
+        wrapper: createWrapper(queryClient),
+      });
+      await waitFor(() => expect(result.current.isStatusSuccess).toBe(true));
+      if (fails) {
+        (operation === "remove"
+          ? apiMocks.authRemoveAccount
+          : apiMocks.authLogout
+        ).mockRejectedValue(new Error("boom"));
+      }
+      act(() =>
+        operation === "remove"
+          ? result.current.removeAccount("acct-1")
+          : result.current.logout(),
+      );
+      await waitFor(() =>
+        expect(queryClient.getQueryState(quotaKey)?.isInvalidated).toBe(true),
+      );
+    },
+  );
+
+  it("leaves the Grok CLI quota alone for other providers", async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+        mutations: { retry: false },
+      },
+    });
+    const quotaKey = ["subscription", "quota", "grokbuild"];
+    queryClient.setQueryData(quotaKey, { success: true, tiers: [] });
+    queryClient.setQueryData(["providers", "codex"], { current: "x" });
+    const { result } = renderHook(() => useManagedAuth("codex_oauth"), {
+      wrapper: createWrapper(queryClient),
+    });
+    await waitFor(() => expect(result.current.isStatusSuccess).toBe(true));
+    act(() => result.current.removeAccount("acct-1"));
+    await waitFor(() => expect(toastMocks.success).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryState(["providers", "codex"])?.isInvalidated,
+      ).toBe(true),
+    );
+    expect(queryClient.getQueryState(quotaKey)?.isInvalidated).toBe(false);
   });
 });
